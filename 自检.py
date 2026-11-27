@@ -175,7 +175,8 @@ def check_final_order():
     d = os.path.join(HERE, "_自检排序")
     if not os.path.isdir(d):
         os.makedirs(d)
-    for n in ("1", "2", "10", "最终", "最后", "第10话 最终"):
+    for n in ("1", "2", "10", "最终", "最后", "第10话 最终",
+              "最终话-后篇", "最终话-前篇", "第3话-某人的故事"):
         sub = os.path.join(d, n)
         if not os.path.isdir(sub):
             os.makedirs(sub)
@@ -184,9 +185,12 @@ def check_final_order():
         if not os.path.exists(f):
             page_image("final", 1, (140, 120, 90)).save(f)
     got = [e[1] for e in mod.list_entries(d)]
-    finals = got[-3:]
-    print("[10] 收尾名称排最后：%s → 末尾 %s" % (got, finals))
-    assert finals == ["最后", "最终", "第10话 最终"], got
+    normal = [n for n in got if not mod.is_final_name(n)]
+    finals = [n for n in got if mod.is_final_name(n)]
+    print("[10] 收尾名称排最后：%s → 正常 %s / 收尾 %s" % (got, normal, finals))
+    assert got[:len(normal)] == normal, got
+    assert set(finals) == {"最终", "最后", "第10话 最终", "最终话-后篇", "最终话-前篇"}, got
+    assert "第3话-某人的故事" in normal, "带数字的正常章节不能被误判成收尾"
     assert got[:3] == ["1", "2", "10"], got
     imgs = [os.path.basename(p) for p in mod.list_images(d)]
     print("     图片排序：%s（最终.png 在最后）" % imgs)

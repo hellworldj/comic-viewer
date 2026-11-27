@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.6 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v1.7 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -111,15 +111,25 @@ def natural_key(name):
 
 
 FINAL_NAMES = ("最终", "最后", "完结", "大结局", "end", "the end", "final")
+FINAL_WORDS = ("最终话", "最后话", "最终回", "最终章", "终章", "完结篇", "大结局")
 
 
 def is_final_name(name, is_file=False):
-    """名字是「最终 / 最后 / 完结」这类收尾标记 → 排序时永远排最后"""
+    """名字里带「最终话 / 最后 / 完结」这类收尾标记 → 排序时永远排最后
+
+    三种命中：整个名字就是收尾词；名字里含「最终话/最后话/终章…」；
+    名字以「最终/最后/完结/大结局」结尾。
+    """
     base = os.path.splitext(name)[0] if is_file else name
     base = (base or "").strip().lower()
     if not base:
         return False
-    return base in FINAL_NAMES or base.endswith(("最终", "最后", "完结", "大结局"))
+    if base in FINAL_NAMES:
+        return True
+    for w in FINAL_WORDS:
+        if w in base:
+            return True
+    return base.endswith(("最终", "最后", "完结", "大结局"))
 
 
 def sort_key(name, is_file=False):
@@ -542,7 +552,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.6")
+        self.root.title("连续看图工具 v1.7")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
