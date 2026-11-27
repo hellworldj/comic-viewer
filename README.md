@@ -52,6 +52,12 @@
 需要 Python 3.8+（Win7 用 3.8.10）和 Pillow：
 
 ```bat
+pip install -r requirements.txt
+```
+
+也可以直接：
+
+```bat
 pip install pillow
 ```
 

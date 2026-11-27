@@ -1,0 +1,3 @@
+# 连续看图工具 · 运行依赖（除 Pillow 外全部为 Python 标准库）
+# 安装： pip install -r requirements.txt
+Pillow>=8.0
