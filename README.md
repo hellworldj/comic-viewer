@@ -30,6 +30,23 @@
 **5. 旋转与缩放**
 `↺ 左转` `↻ 右转` 转当前页，勾上**整本**就整个文件夹/压缩包一起转（扫歪的整本漫画一键摆正），缩略图同步跟转。`－ / ＋` 或 **Ctrl+滚轮** 在 40%–400% 缩放，`适应` 回到按窗宽显示。旋转只是阅读视角，**原图一个字节都不动**。
 
+## 环境要求 / Requirements
+
+| 项目 | 要求 | 说明 |
+|---|---|---|
+| 操作系统 | Windows 7 SP1 / 10 / 11（64 位） | 需要 tcl/tk 8.6；已在 Win7 目标下用 Python 3.8.10 打包验证路径 |
+| Python | **3.8 – 3.13** | Win7 上只能用 3.8.10（官方支持 Win7 的最后一版）；Win10/11 可用新版 |
+| tkinter | 必装，随 Python 官方安装包勾选 `tcl/tk and IDLE` | 缺失时启动器会提示「没有找到可用的 Python」 |
+| Pillow | **≥ 8.0**（建议最新版） | 唯一第三方依赖：`pip install pillow`；`Image.Resampling` / `Image.Transpose` 缺失时自动回退老 API |
+| 内存 | 建议 ≥ 2 GB 空闲 | 视口附近才解码，通常只占几十 MB；超长竖图按 1000px 分片 |
+| rar / cbr | WinRAR（`UnRAR.exe` / `Rar.exe`）或 7-Zip | 自动查 `Program Files\WinRAR`、`D:\tool\7-Zip`、App Paths 注册表、PATH；缺了会回退到另一个 |
+| 7z | 7-Zip（`7z.exe`） | 同样自动查找；没有 WinRAR 时 rar 也可用 7z 解 |
+| zip / cbz | 无外部依赖 | 走 Python 标准库 `zipfile`，含 GBK 文件名修复 |
+| 打包 exe | PyInstaller（可选） | Win7 目标需 Python 3.8.10 + PyInstaller ≤ 4.10；Win10/11 用新版即可 |
+| 磁盘 | 首次打开会生成缓存 | `thumbcache\` 缩略图、`extract_cache\` 解压缓存，都可随时删除 |
+
+没有外部依赖的部分全部是标准库：`zipfile` / `subprocess` / `hashlib` / `threading` / `tkinter`。除 Pillow 外不需要 `pip install` 任何东西；不联网也能用（只看本地文件）。
+
 ## 运行
 
 需要 Python 3.8+（Win7 用 3.8.10）和 Pillow：
