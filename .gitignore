@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# 本地缓存（不入库）
+thumbcache/
+extract_cache/
+config.json
+_run.log
+_run.out
+_tmp_zip_page.png
+
+# 打包产物
+build/
+dist/
+*.spec
