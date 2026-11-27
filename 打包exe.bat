@@ -1,23 +1,15 @@
 @echo off
-rem =========================================================================
-rem  Build a single-file exe with PyInstaller.  Chinese help: 浣跨敤璇存槑.md
-rem  Requires: pip install pillow pyinstaller
-rem =========================================================================
+rem Build single-file exe. Requires: pip install pillow pyinstaller
 setlocal
 cd /d "%~dp0"
-
 where pyinstaller >nul 2>&1
 if errorlevel 1 (
-    echo [x] pyinstaller not found. Run:  pip install pyinstaller
+    echo [x] pyinstaller not found. Run: pip install pyinstaller
     pause
     exit /b 1
 )
-
-for %%F in ("%~dp0*.pyw") do set "APP=%%~fF"
-
-pyinstaller --noconfirm --onefile --noconsole --name "ImageStripViewer" "%APP%"
-
+pyinstaller --noconfirm --clean --onefile --noconsole --name "看图工具" 看图工具.pyw
 echo.
-echo Output: dist\ImageStripViewer.exe
-echo For Windows 7 target, build with Python 3.8.10 + PyInstaller 4.10.
+echo Output: dist\看图工具.exe   (本机已生成可直接用)
+echo Win7 目标需用 Python 3.8.10 + PyInstaller 4.10 打包。
 pause

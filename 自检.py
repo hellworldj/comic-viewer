@@ -388,6 +388,27 @@ def check_gui():
     print("    批次下拉 5 / 10 / 20 切换 OK（当前 %d，存在 config.json）" % app.batch)
     app.autonext.set(1)
 
+    # 固定图片宽度 / 纯净看图 / 状态栏信息
+    app.set_fixed_width_value(1400)
+    wait(root, 0.6)
+    print("[11] 固定宽度：dw=%d px，缩放标签 %s" % (app.dw, app.zoom_var.get()))
+    assert app.dw == 1400 and "1400" in app.zoom_var.get()
+    app._enter_view_mode()
+    wait(root, 0.6)
+    print("     纯净看图：view_mode=%s，工具栏可见=%s，面板数=%d"
+          % (app.view_mode, app.bar.winfo_ismapped(), len(app.paned.panes())))
+    assert app.view_mode and not app.bar.winfo_ismapped()
+    assert len(app.paned.panes()) == 1, "纯净模式应只留图片浏览区"
+    app._exit_view_mode()
+    wait(root, 0.6)
+    assert not app.view_mode and app.bar.winfo_ismapped()
+    assert len(app.paned.panes()) == 3, "退出后应恢复三栏"
+    txt = app.info.cget("text")
+    print("     状态栏：%s" % txt)
+    assert "PNG" in txt.upper() and "x" in txt and ("B" in txt), "状态栏要显示尺寸/体积/格式"
+    app.set_fixed_width_value(0)
+    wait(root, 0.4)
+
     root.destroy()
     print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻）、分批读取 —— 全部正常")
 

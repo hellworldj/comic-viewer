@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.7 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.0 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -24,7 +24,7 @@ import queue
 import zipfile
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 try:
     from PIL import Image, ImageTk, ImageOps
@@ -139,6 +139,18 @@ def sort_key(name, is_file=False):
 
 def is_image_name(name):
     return os.path.splitext(name)[1].lower() in IMG_EXT
+
+
+def human_size(n):
+    try:
+        n = float(n)
+    except Exception:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "?"
 
 
 def is_archive(path):
@@ -552,7 +564,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.7")
+        self.root.title("连续看图工具 v2.0")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -571,8 +583,13 @@ class ViewerApp(object):
 
         self.rot = {}                 # 路径 -> 0/90/180/270（视角旋转）
         self.zoom = 1.0               # 1.0 = 适应宽度
+        self.fixed_w = 0              # >0 = 固定显示宽度（像素），忽略窗口宽度
         self.dw = 700
         self.off_x = 0
+        self.view_mode = False        # 纯净看图（只留图片区）
+        self._menu = None
+        self._jump_to = None          # 打开文件后要跳到的那个文件
+        self._saved_geo = None
 
         # 连读（读到最后一页自动接下一个文件夹/压缩包）
         self.albums = []              # [{kind, src, folder, start, end}]
@@ -620,6 +637,17 @@ class ViewerApp(object):
     def _build_ui(self):
         bar = tk.Frame(self.root)
         bar.pack(side="top", fill="x")
+        self.bar = bar
+
+        # 底部状态栏先占位：先 pack 到底部，三栏（expand）才不会把它挤没
+        self.status_bar = tk.Frame(self.root, bd=1, relief="sunken")
+        self.status_bar.pack(side="bottom", fill="x")
+        self.status = tk.Label(self.status_bar, text="就绪", anchor="w",
+                               font=FONT_SMALL, fg="#555", bd=0)
+        self.info = tk.Label(self.status_bar, text="", anchor="e",
+                             font=FONT_SMALL, fg="#333", bd=0)
+        self.status.pack(side="left", padx=8)
+        self.info.pack(side="right", padx=8)
 
         self.btn_open = tk.Button(bar, text="打开目录", command=self.choose_dir, font=FONT_UI)
         self.btn_open.pack(side="left", padx=(8, 4), pady=5)
@@ -676,6 +704,7 @@ class ViewerApp(object):
         paned = tk.PanedWindow(self.root, orient="horizontal",
                                sashwidth=6, sashrelief="raised", bd=0)
         paned.pack(side="top", fill="both", expand=True)
+        self.paned = paned
 
         # 左：目录树
         left = tk.Frame(paned, bg="#f0f0f0")
@@ -687,6 +716,7 @@ class ViewerApp(object):
         self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         paned.add(left, width=230, minsize=150, stretch="never")
+        self.left_frame = left
 
         # 中：缩略图
         mid = tk.Frame(paned, bg="#2b2b2b")
@@ -702,6 +732,7 @@ class ViewerApp(object):
         self.thumb_canvas.bind("<Button-4>", lambda e: self._thumb_scroll(-100))
         self.thumb_canvas.bind("<Button-5>", lambda e: self._thumb_scroll(100))
         paned.add(mid, width=340, minsize=180)
+        self.mid_frame = mid
 
         # 右：连续长图
         right = tk.Frame(paned, bg="#111111")
@@ -718,15 +749,18 @@ class ViewerApp(object):
         self.strip.bind("<Button-5>", lambda e: self._strip_scroll(120))
         self.strip.bind("<Configure>", self._on_strip_config)
         self.strip.bind("<Button-1>", lambda e: self.strip.focus_set())
+        self.strip.bind("<Double-Button-1>", self._toggle_view_mode)
         for seq, handler in (("<Up>", self._key_up), ("<Down>", self._key_down),
                              ("<Prior>", self._page_up), ("<Next>", self._page_down),
                              ("<Home>", self._key_home), ("<End>", self._key_end)):
             self.root.bind(seq, handler)
         paned.add(right, width=760, minsize=300)
+        self.right_frame = right
 
-        self.status = tk.Label(self.root, text="就绪", anchor="w", font=FONT_SMALL,
-                               fg="#555", bd=1, relief="sunken")
-        self.status.pack(side="bottom", fill="x")
+        for w in (self.strip, self.thumb_canvas, self.tree,
+                  self.status, self.info, self.status_bar):
+            w.bind("<Button-3>", self._show_menu, add="+")
+        self.root.bind("<Escape>", self._key_escape)
 
         style = ttk.Style()
         try:
@@ -783,6 +817,178 @@ class ViewerApp(object):
                 json.dump(cfg, f, ensure_ascii=False)
         except Exception:
             pass
+
+    # ------------------------------------------------------------ 右键菜单 / 纯净看图 / 打开文件
+
+    def _show_menu(self, event=None):
+        m = self._menu
+        if m is None:
+            m = self._menu = tk.Menu(self.root, tearoff=0)
+        m.delete(0, "end")
+        m.add_command(label="打开文件夹…", command=self.choose_dir)
+        m.add_command(label="打开文件…", command=self.open_file)
+        bm = tk.Menu(m, tearoff=0)
+        for n in (5, 10, 20):
+            bm.add_radiobutton(label="每批 %d 张" % n, value=str(n),
+                               variable=self.batch_var, command=self._on_batch_change)
+        m.add_cascade(label="每批张数（当前 %d）" % self.batch, menu=bm)
+        m.add_separator()
+        m.add_command(label="放大", command=lambda: self.zoom_by(1.15))
+        m.add_command(label="缩小", command=lambda: self.zoom_by(0.87))
+        m.add_command(label="适应窗口大小", command=self.zoom_fit)
+        m.add_command(label="固定图片宽度…", command=self.set_fixed_width)
+        m.add_separator()
+        m.add_command(label=("退出纯净看图（Esc）" if self.view_mode
+                             else "只看图片（双击也可以）"),
+                      command=self._toggle_view_mode)
+        m.add_command(label="刷新目录", command=self.refresh)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    def _toggle_view_mode(self, event=None):
+        if self.view_mode:
+            self._exit_view_mode()
+        else:
+            self._enter_view_mode()
+        return "break"
+
+    def _enter_view_mode(self):
+        if self.view_mode or not self.paths:
+            return
+        self.view_mode = True
+        self._saved_geo = self.root.winfo_geometry()
+        for pane in (self.left_frame, self.mid_frame):
+            try:
+                self.paned.forget(pane)
+            except Exception:
+                pass
+        try:
+            self.bar.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.root.attributes("-fullscreen", True)
+        except Exception:
+            pass
+        self._invalidate_strip()
+        self._strip_sync(force=True)
+        self.status.configure(text="纯净看图：双击或 Esc 退出，右键出菜单")
+
+    def _exit_view_mode(self):
+        if not self.view_mode:
+            return
+        self.view_mode = False
+        try:
+            self.root.attributes("-fullscreen", False)
+        except Exception:
+            pass
+        for pane in (self.left_frame, self.mid_frame, self.right_frame):
+            try:
+                self.paned.forget(pane)
+            except Exception:
+                pass
+        self.paned.add(self.left_frame, width=230, minsize=150, stretch="never")
+        self.paned.add(self.mid_frame, width=340, minsize=180)
+        self.paned.add(self.right_frame, width=760, minsize=300)
+        try:
+            self.bar.pack(side="top", fill="x", before=self.paned)
+        except Exception:
+            try:
+                self.bar.pack(side="top", fill="x")
+            except Exception:
+                pass
+        if self._saved_geo:
+            try:
+                self.root.geometry(self._saved_geo)
+            except Exception:
+                pass
+        self._invalidate_strip()
+        self._strip_sync(force=True)
+        self.status.configure(text="已退出纯净看图")
+
+    def open_file(self):
+        p = filedialog.askopenfilename(
+            title="打开图片或压缩包",
+            filetypes=[("图片", "*.jpg *.jpeg *.jpe *.png *.bmp *.gif *.webp *.tif *.tiff"),
+                       ("压缩包", "*.zip *.cbz *.rar *.cbr *.7z"),
+                       ("所有文件", "*.*")])
+        if not p:
+            return
+        if is_archive(p):
+            self.open_archive_path(p)
+            return
+        if not is_image_name(os.path.basename(p)):
+            messagebox.showwarning("提示", "不支持这个文件：\n%s" % p)
+            return
+        folder = os.path.dirname(p)
+        self._jump_to = os.path.normcase(os.path.abspath(p))
+        self.load_folder(folder, src=self._src_of(folder))
+        self._show_path_in_tree(p)
+
+    def _show_path_in_tree(self, path):
+        """在左栏里选中这个文件所在的条目（能找到就选）"""
+        for iid, p in list(self.tree_paths.items()):
+            try:
+                if os.path.normcase(os.path.abspath(p)) == \
+                        os.path.normcase(os.path.abspath(os.path.dirname(path))):
+                    self.tree.see(iid)
+                    return
+            except Exception:
+                pass
+
+    def _try_jump(self):
+        """打开文件时记下的目标页：加载到哪批就跳到哪一张"""
+        if not self._jump_to:
+            return
+        target = self._jump_to
+        for i, p in enumerate(self.paths):
+            if os.path.normcase(os.path.abspath(p)) == target:
+                self._jump_to = None
+                self._goto_page(i)
+                return
+        if self.pending:
+            self._maybe_more()
+        else:
+            self._jump_to = None
+
+    def set_fixed_width(self):
+        cur = int(self.fixed_w or self.dw)
+        n = simpledialog.askinteger("固定图片宽度",
+                                    "显示宽度（像素，填 0 回到适应窗口）：",
+                                    initialvalue=cur, minvalue=0, maxvalue=8000,
+                                    parent=self.root)
+        if n is None:
+            return
+        self.set_fixed_width_value(n)
+        if n == 0:
+            self.status.configure(text="已恢复为适应窗口大小")
+        else:
+            self.status.configure(text="固定图片宽度 %d px（可左右拖动横向滚动条）" % n)
+
+    def _key_escape(self, event=None):
+        if self.view_mode:
+            self._exit_view_mode()
+            return "break"
+
+    def _update_info(self):
+        if not self.paths or self.cur_index < 0:
+            self.info.configure(text="")
+            return
+        try:
+            p = self.paths[self.cur_index]
+            w, h = self.sizes[self.cur_index]
+            size = os.path.getsize(p)
+        except Exception:
+            return
+        fmt = os.path.splitext(p)[1].lstrip(".").upper() or "?"
+        self.info.configure(text="%s   %dx%d   %s   %s   第 %d/%d 页   %s" % (
+            os.path.basename(p), w, h, human_size(size), fmt,
+            self.cur_index + 1, len(self.paths), self.zoom_var.get()))
 
     # ------------------------------------------------------------ 目录树
 
@@ -1103,6 +1309,9 @@ class ViewerApp(object):
         t = threading.Thread(target=self._thumb_worker, args=(self.token, self.paths),
                              daemon=True)
         t.start()
+        self._strip_sync(force=True)
+        self._update_info()
+        self._try_jump()
 
     # ------------------------------------------------------------ 缩略图区
 
@@ -1248,15 +1457,43 @@ class ViewerApp(object):
                                 len(list(targets)), deg))
 
     def zoom_by(self, factor):
+        if self.fixed_w > 0:
+            new_w = max(120, min(8000, int(round(self.fixed_w * factor))))
+            if new_w == self.fixed_w:
+                return
+            self.fixed_w = new_w
+            self.zoom_var.set("宽 %dpx" % new_w)
+            keep = self.cur_index if self.cur_index >= 0 else 0
+            self._invalidate_strip()
+            self._goto_page(keep)
+            self._update_info()
+            self.status.configure(text="固定宽度 %d px（右键菜单可改回适应窗口）" % new_w)
+            return
         new = max(0.4, min(4.0, self.zoom * factor))
         if abs(new - self.zoom) < 1e-3:
             return
         self._apply_zoom(new)
 
     def zoom_fit(self):
+        if self.fixed_w > 0:
+            self.set_fixed_width_value(0)
+            return
         if abs(self.zoom - 1.0) < 1e-3:
             return
         self._apply_zoom(1.0)
+
+    def set_fixed_width_value(self, n):
+        self.fixed_w = int(n)
+        self.zoom = 1.0
+        self.zoom_var.set("100%" if self.fixed_w == 0 else "宽 %dpx" % self.fixed_w)
+        keep = self.cur_index if self.cur_index >= 0 else 0
+        self._invalidate_strip()
+        try:
+            self.strip.xview_moveto(0.0)
+        except Exception:
+            pass
+        self._goto_page(keep)
+        self._update_info()
 
     def _apply_zoom(self, new):
         keep = self.cur_index if self.cur_index >= 0 else 0
@@ -1265,6 +1502,7 @@ class ViewerApp(object):
         self._invalidate_strip()
         self.strip.xview_moveto(0.0)
         self._goto_page(keep)
+        self._update_info()
         self.status.configure(text="缩放 %d%%（Ctrl+滚轮也可以调）" % int(round(new * 100)))
 
     def _invalidate_strip(self):
@@ -1449,6 +1687,8 @@ class ViewerApp(object):
         left = len(self.pending)
         self.status.configure(text="已载入 %d 张%s" % (
             len(self.paths), ("，这本还剩 %d 张" % left) if left else "（这本读完）"))
+        self._update_info()
+        self._try_jump()
 
     def _extend_layout(self, start):
         c = self.strip
@@ -1514,7 +1754,10 @@ class ViewerApp(object):
     def _layout_strip(self):
         c = self.strip
         cw = max(40, c.winfo_width())
-        self.dw = max(40, int(round(cw * self.zoom)))
+        if self.fixed_w > 0:
+            self.dw = max(40, int(self.fixed_w))
+        else:
+            self.dw = max(40, int(round(cw * self.zoom)))
         content_w = max(cw, self.dw)
         self.off_x = (cw - self.dw) // 2 if self.dw < cw else 0
         self.geom = []
@@ -1784,6 +2027,7 @@ class ViewerApp(object):
         self.pos_var.set("第 %d / %d 页%s" % (
             idx + 1 if idx >= 0 else 0, len(self.paths),
             ("（后面还有 %d 张没读）" % len(self.pending)) if self.pending else ""))
+        self._update_info()
 
     # ------------------------------------------------------------ 关闭
 
@@ -1818,6 +2062,26 @@ def main():
             root.after(120, lambda: app.open_root(target))
         elif is_archive(target):
             root.after(200, lambda: app.open_archive_path(target))
+
+    diag = os.environ.get("PV_DIAG")
+    if os.environ.get("PV_VIEW"):
+        root.after(1200, app._enter_view_mode)
+    if diag:
+        def _diag():
+            try:
+                with open(diag, "w", encoding="utf-8") as f:
+                    f.write("root_geo=%s\n" % root.winfo_geometry())
+                    f.write("bar=%s status_bar=%s h=%d status=%s info=%s\n" % (
+                        app.bar.winfo_ismapped(), app.status_bar.winfo_ismapped(),
+                        app.status_bar.winfo_height(), app.status.winfo_ismapped(),
+                        app.info.cget("text")))
+                    f.write("paned=%s %s\n" % (app.paned.winfo_ismapped(),
+                                              app.paned.winfo_geometry()))
+            except Exception as e:
+                pass
+            root.destroy()
+        root.after(2000, _diag)
+
     root.mainloop()
 
 
