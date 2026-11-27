@@ -10,7 +10,7 @@ _run.log
 _run.out
 _tmp_zip_page.png
 _tmp_multi_page.png
-_自检批次/
+_自检*/
 
 # 打包产物
 build/
@@ -20,4 +20,4 @@ dist/
 # 本地预览图（仓库里只用 docs/screenshot.png）
 界面预览.png
 
-_自检排序/
+
