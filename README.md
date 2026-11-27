@@ -4,6 +4,10 @@
 
 ![界面截图](docs/screenshot.png)
 
+## 下载
+
+**v1.0 绿色版（免装 Python，双击运行）**：[Releases v1.0](https://github.com/hellworldj/comic-viewer/releases/tag/v1.0) → 下载 `ComicViewer-v1.0-win64.exe`（24 MB，Windows 10/11 64 位）。
+
 ## 特性
 
 **1. 文件夹天然按“顺序”排**
