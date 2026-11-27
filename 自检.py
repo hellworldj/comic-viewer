@@ -487,8 +487,42 @@ def check_gui():
     except Exception as e:
         print("     字号检查跳过：%s" % e)
 
-    root.destroy()
+    app.shutdown()
     print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻）、分批读取 —— 全部正常")
+
+def check_smooth():
+    """滚动不能卡：解码在后台线程，主线程只贴图；滚轮事件合并绘制"""
+    import tkinter as tk
+    bdir = make_batch_dir(12)
+    root = tk.Tk()
+    root.withdraw()
+    app = mod.ViewerApp(root)
+    root.deiconify()
+    app.open_root(bdir)
+    wait(root, 2.5)
+    assert len(app.paths) >= 5 and app.total_hint == 12
+    # 首屏应该已经贴出来（后台解码 + 主线程贴图）
+    drawn = len(app.page_photos)
+    print("[14] 首屏已贴 %d 片，待解码 %d 个任务" % (drawn, app.band_q.qsize()))
+    assert drawn >= 1, "后台解码完要把图贴到画布上"
+
+    # 连续 40 次滚轮事件：处理函数本身必须很快（不能在这里解码图片）
+    t0 = time.time()
+    for _ in range(40):
+        app._strip_scroll(120)
+        root.update()
+    per = (time.time() - t0) / 40 * 1000
+    print("     连续 40 次滚轮：平均每次 %.1f ms（含 update）" % per)
+    assert per < 30, "单次滚动处理超过 30ms 就会感觉卡"
+
+    wait(root, 2.0)
+    # 滚到底以后画布上应该还有图（不是滚一路黑）
+    assert len(app.page_photos) >= 1, "滚动过程中要持续有图贴上"
+    # 到末尾之前的预取 / 分批还在正常跑
+    print("     滚动后已贴 %d 片、已载入 %d 张、待读 %d 张"
+          % (len(app.page_photos), len(app.paths), len(app.pending)))
+    app.shutdown()
+
 
 if __name__ == "__main__":
     make_sample()
@@ -500,4 +534,6 @@ if __name__ == "__main__":
     check_thumbs()
     check_archives()
     check_gui()
+    check_smooth()
     print("\n自检通过 ✔")
+

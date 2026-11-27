@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.4 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.5 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import json
+import time
 import hashlib
 import shutil
 import subprocess
@@ -162,7 +163,7 @@ def auto_font_level(root):
 CELL_W = 162          # 缩略图格子宽
 CELL_H = 196          # 缩略图格子高
 THUMB_MAX = 148       # 缩略图长边像素
-BAND_H = 1000         # 超长页面分片显示的单片高度（避免一张图吃掉几百 MB）
+BAND_H = 800          # 超长页面分片显示的单片高度（片小一点，单次贴图更快、滚动更顺）
 MAX_BASE = 2          # 解码后的整页缓存数量
 MAX_DEPTH = 12        # 解压后自动下钻的最大层数
 BATCH = 5             # 一次只读这么多张，滚到附近再读下一批（省内存、秒开）
@@ -689,7 +690,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.4")
+        self.root.title("连续看图工具 v2.5")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -739,6 +740,16 @@ class ViewerApp(object):
         self.base_cache = {}
         self.base_order = []
 
+        # 图片解码放后台线程，主线程只管贴图：图多、图大时滚动不再卡
+        self.band_q = queue.Queue()
+        self._band_pending = set()    # 正在后台解码的 (页, 片)
+        self._need_keys = set()       # 当前视口需要的 (页, 片)
+        self._sync_job = None         # 滚动合并绘制用
+        self._retry_job = None        # 解码队列满了，回头再补一次
+        self.photo_cache = {}         # 最近贴过的片，来回滚不用重新解码
+        self.photo_order = []
+        threading.Thread(target=self._band_worker_loop, daemon=True).start()
+
         self._resize_job = None
         self._build_job = None
         self._more_job = None          # 快到末尾时的预取定时器
@@ -754,7 +765,7 @@ class ViewerApp(object):
         self._build_ui()
         self._load_cfg()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(50, self._poll)
+        self._poll_id = self.root.after(50, self._poll)
         self.root.after(200, self._auto_open)
 
     # ------------------------------------------------------------ 界面
@@ -1387,6 +1398,43 @@ class ViewerApp(object):
         sizes = [read_size(p) for p in paths[:self.batch]]   # 只量首批，其余等滚到再量
         self.q.put(("scan", token, folder, paths, sizes))
 
+    def _band_worker_loop(self):
+        """后台解码：一次解一张整页，切好视口要的几片，再交给主线程贴图"""
+        while True:
+            job = self.band_q.get()
+            if job is None:
+                return
+            try:
+                token, i, path, dw, deg, bands = job
+                base = None
+                try:
+                    base = load_page_image(path, dw, deg)
+                except Exception:
+                    base = None
+                if base is None:
+                    for b in bands:
+                        self.q.put(("band", token, i, b, dw, deg, None))
+                    continue
+                H = base.size[1]
+                if H <= BAND_H:
+                    if 0 in bands:
+                        self.q.put(("band", token, i, 0, dw, deg, base))
+                else:
+                    for b in bands:
+                        top = b * BAND_H
+                        if top >= H:
+                            self.q.put(("band", token, i, b, dw, deg, None))
+                            continue
+                        self.q.put(("band", token, i, b, dw, deg,
+                                    base.crop((0, top, base.size[0], min(H, top + BAND_H)))))
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.band_q.task_done()
+                except Exception:
+                    pass
+
     def _thumb_worker(self, token, paths, offset=0):
         for i, p in enumerate(paths):
             if token != self.token:
@@ -1403,18 +1451,28 @@ class ViewerApp(object):
     def _poll(self):
         if self._closing:
             return
+        t0 = time.time()
+        thumbs = 0
         try:
             while True:
+                # 每轮最多在事件循环里待 22ms，剩下的下一轮再干：缩略图再多也不会卡住界面
+                if time.time() - t0 > 0.022:
+                    break
                 msg = self.q.get_nowait()
                 kind = msg[0]
                 if kind == "scan":
                     _, token, folder, paths, sizes = msg
                     if token == self.token:
                         self._on_scan_done(folder, paths, sizes)
+                elif kind == "band":
+                    self._on_band_ready(msg)
                 elif kind == "thumb":
                     _, token, idx = msg
                     if token == self.token:
                         self._on_thumb_ready(idx)
+                        thumbs += 1
+                        if thumbs >= 6:              # 每轮最多 6 张缩略图，避免一次把主线程堵死
+                            break
                 elif kind == "thumb_done":
                     _, token, n = msg
                     if token == self.token:
@@ -1442,7 +1500,7 @@ class ViewerApp(object):
             pass
         except Exception:
             pass
-        self.root.after(60, self._poll)
+        self._poll_id = self.root.after(60, self._poll)
 
     def _batch_worker(self, token, chunk, mode, kind, src, folder):
         """只把这一批的尺寸量出来（不读像素），量完就交给主线程拼接"""
@@ -1685,6 +1743,10 @@ class ViewerApp(object):
         self.page_photos.clear()
         self.base_cache.clear()
         self.base_order = []
+        self._band_pending.clear()
+        self._need_keys.clear()
+        self.photo_cache.clear()
+        self.photo_order = []
         if self.paths:
             self._layout_strip()
 
@@ -2017,10 +2079,35 @@ class ViewerApp(object):
         vh = c.winfo_height()
         new = max(0, min(self.strip_total - vh, top + dy))
         c.yview_moveto(new / max(1.0, float(self.strip_total)))
-        self._strip_sync()
+        self._sync_soon()
         if dy > 0:
             self._maybe_more()
         return "break"
+
+    def _sync_soon(self):
+        """把连续几个滚轮事件合并成一次绘制，滚动更顺，不会一个事件卡一下"""
+        if self._sync_job is not None:
+            return
+        try:
+            self._sync_job = self.root.after(12, self._run_sync_soon)
+        except Exception:
+            self._sync_job = None
+
+    def _run_sync_soon(self):
+        self._sync_job = None
+        self._strip_sync()
+
+    def _sync_retry(self):
+        if self._retry_job is not None:
+            return
+        try:
+            self._retry_job = self.root.after(150, self._run_sync_retry)
+        except Exception:
+            self._retry_job = None
+
+    def _run_sync_retry(self):
+        self._retry_job = None
+        self._strip_sync()
 
     def _goto_page(self, idx):
         if not self.paths:
@@ -2053,6 +2140,8 @@ class ViewerApp(object):
 
     def _strip_sync(self, force=False):
         c = self.strip
+        if self._closing:
+            return
         if not self.paths or not self.geom:
             return
         top = c.canvasy(0)
@@ -2096,10 +2185,34 @@ class ViewerApp(object):
                         pass
                 self.page_photos.pop(key, None)
 
-        for key in sorted(need):
-            if key in self.page_photos:
+        self._need_keys = need
+        # 缺的片交给后台线程解码，主线程不碰磁盘和 resize
+        missing = {}
+        for key in need:
+            if key in self.page_photos or key in self._band_pending:
                 continue
-            self._draw_page_band(key)
+            i, b = key
+            missing.setdefault(i, []).append(b)
+        if missing and self.band_q.qsize() < 8:
+            for i, bands in missing.items():
+                if i >= len(self.paths) or i >= len(self.geom):
+                    continue
+                dw = self.geom[i][1]
+                deg = self.rot.get(self.paths[i], 0)
+                left = []
+                for b in bands:
+                    ck = (self.paths[i], dw, deg, b)
+                    ph = self.photo_cache.get(ck)
+                    if ph is not None:                 # 来回滚：直接用缓存的片
+                        self._place_band(i, b, ph)
+                        continue
+                    self._band_pending.add((i, b))
+                    left.append(b)
+                if left:
+                    self.band_q.put((self.token, i, self.paths[i], dw, deg, sorted(left)))
+        elif missing:
+            # 滚太快、解码队列已满：等线程消化一会儿，再补一次当前视口（停下后不会留黑块）
+            self._sync_retry()
 
         if force:
             for key in list(self.page_items.keys()):
@@ -2130,6 +2243,51 @@ class ViewerApp(object):
             self._more_job = self.root.after(80, run)
         except Exception:
             self._more_job = None
+
+    def _place_band(self, i, b, photo):
+        try:
+            if i >= len(self.geom):
+                return
+            y0 = self.geom[i][0]
+            item = self.strip.create_image(self.off_x, y0 + b * BAND_H,
+                                           anchor="nw", image=photo)
+            self.page_photos[(i, b)] = photo
+            self.page_items[(i, b)] = item
+        except Exception:
+            pass
+
+    def _on_band_ready(self, msg):
+        """后台解码好的图到主线程了：还需要的就贴上去"""
+        _, token, i, b, dw, deg, im = msg
+        key = (i, b)
+        self._band_pending.discard(key)
+        if token != self.token:
+            return                        # 已经换书了，旧图作废
+        if im is None or key not in self._need_keys:
+            return
+        if i >= len(self.geom) or i >= len(self.paths):
+            return
+        if self.geom[i][1] != dw or self.rot.get(self.paths[i], 0) != deg:
+            return                       # 缩放/旋转已经变了，这张作废
+        if key in self.page_photos:
+            return
+        try:
+            photo = ImageTk.PhotoImage(im)
+        except Exception:
+            return
+        self._place_band(i, b, photo)
+        # 记进小缓存：往回滚/小幅来回滚时直接复用，不重新解码
+        try:
+            ck = (self.paths[i], dw, deg, b)
+            if ck not in self.photo_cache:
+                self.photo_order.append(ck)
+            self.photo_cache[ck] = photo
+            while len(self.photo_order) > 6:
+                old = self.photo_order.pop(0)
+                if old in self.photo_cache and old != ck:
+                    self.photo_cache.pop(old, None)
+        except Exception:
+            pass
 
     def _draw_page_band(self, key):
         i, b = key
@@ -2201,13 +2359,33 @@ class ViewerApp(object):
 
     # ------------------------------------------------------------ 关闭
 
-    def on_close(self):
+    def shutdown(self):
+        """停掉定时器再销毁窗口：避免 after 回调在窗口没了以后还报一次错"""
         self._closing = True
-        self._save_cfg()
+        try:
+            self.root.after_cancel(self._poll_id)
+        except Exception:
+            pass
+        for attr in ("_sync_job", "_retry_job", "_more_job", "_resize_job", "_build_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        try:
+            self.root.update()          # 把已经排队的回调跑完（_closing=True 时它不会再排下一次）
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:
             pass
+
+    def on_close(self):
+        self._save_cfg()
+        self.shutdown()
 
 
 def main():
