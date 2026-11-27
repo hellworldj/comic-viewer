@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.1 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.2 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -62,6 +62,17 @@ BAND_H = 1000         # 超长页面分片显示的单片高度（避免一张�
 MAX_BASE = 2          # 解码后的整页缓存数量
 MAX_DEPTH = 12        # 解压后自动下钻的最大层数
 BATCH = 5             # 一次只读这么多张，滚到附近再读下一批（省内存、秒开）
+AUTO_EXIF = False     # 是否按 EXIF 方向自动摆正（工具栏可勾选，默认不勾）
+
+
+def exif_swap_needed(path):
+    """EXIF 方向 5-8 会让宽高互换"""
+    try:
+        with Image.open(path) as im:
+            o = int((im.getexif() or {}).get(274, 0) or 0)
+            return o in (5, 6, 7, 8)
+    except Exception:
+        return False
 
 
 def resample_filter():
@@ -241,14 +252,14 @@ def list_images(path):
 # ---------------------------------------------------------------- 缩略图缓存
 
 def thumb_file(path):
-    """缩略图缓存文件名：路径 + 修改时间 + 大小 的哈希"""
+    """缩略图缓存文件名：路径 + 修改时间 + 大小 + 是否按 EXIF 摆正 的哈希"""
     try:
         st = os.stat(path)
-        raw = "%s|%d|%d|%d|%d" % (os.path.abspath(path).lower(),
-                                  st.st_mtime_ns if hasattr(st, "st_mtime_ns") else int(st.st_mtime),
-                                  st.st_size, CELL_W, THUMB_MAX)
+        raw = "%s|%d|%d|%d|%d|%d" % (os.path.abspath(path).lower(),
+                                     st.st_mtime_ns if hasattr(st, "st_mtime_ns") else int(st.st_mtime),
+                                     st.st_size, CELL_W, THUMB_MAX, 1 if AUTO_EXIF else 0)
     except OSError:
-        raw = os.path.abspath(path).lower()
+        raw = "%s|%d" % (os.path.abspath(path).lower(), 1 if AUTO_EXIF else 0)
     return os.path.join(CACHE_DIR, hashlib.md5(raw.encode("utf-8")).hexdigest() + ".jpg")
 
 
@@ -260,7 +271,8 @@ def make_thumb(path):
     if not os.path.isdir(CACHE_DIR):
         os.makedirs(CACHE_DIR)
     with Image.open(path) as im:
-        im = ImageOps.exif_transpose(im)
+        if AUTO_EXIF:
+            im = ImageOps.exif_transpose(im)
         try:
             im.draft("RGB", (THUMB_MAX * 2, THUMB_MAX * 2))
         except Exception:
@@ -283,7 +295,8 @@ def make_thumb(path):
 def load_page_image(path, dw, deg=0):
     """整页解码，按旋转后的宽度缩放到 dw"""
     with Image.open(path) as im:
-        im = ImageOps.exif_transpose(im)
+        if AUTO_EXIF:
+            im = ImageOps.exif_transpose(im)
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         try:
@@ -302,7 +315,15 @@ def load_page_image(path, dw, deg=0):
 def read_size(path):
     try:
         with Image.open(path) as im:
-            return im.size
+            w, h = im.size
+            if AUTO_EXIF:
+                try:
+                    o = int((im.getexif() or {}).get(274, 0) or 0)
+                except Exception:
+                    o = 0
+                if o in (5, 6, 7, 8):
+                    return (h, w)
+            return (w, h)
     except Exception:
         return (0, 0)
 
@@ -564,7 +585,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.1")
+        self.root.title("连续看图工具 v2.2")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -679,6 +700,11 @@ class ViewerApp(object):
 
         self.autonext = tk.BooleanVar(value=True)
         tk.Checkbutton(bar, text="连读下一个", variable=self.autonext,
+                       font=FONT_UI).pack(side="left", padx=2)
+
+        self.autoexif = tk.IntVar(value=0)
+        tk.Checkbutton(bar, text="自动纠正方向", variable=self.autoexif,
+                       command=self._on_autoexif_change,
                        font=FONT_UI).pack(side="left", padx=2)
 
         tk.Label(bar, text="每批", font=FONT_UI).pack(side="left", padx=(8, 2))
@@ -796,6 +822,28 @@ class ViewerApp(object):
             self.batch_var.set(str(self.batch))
         except Exception:
             pass
+        global AUTO_EXIF
+        auto_exif = bool(cfg.get("autoexif"))
+        try:
+            self.autoexif.set(1 if auto_exif else 0)
+        except Exception:
+            pass
+        AUTO_EXIF = auto_exif
+
+    def _on_autoexif_change(self):
+        """勾选/取消「自动纠正方向」：立即按新方向重读当前这本"""
+        global AUTO_EXIF
+        AUTO_EXIF = bool(self.autoexif.get())
+        self._save_cfg()
+        keep = None
+        if 0 <= self.cur_index < len(self.paths):
+            keep = self.paths[self.cur_index]
+        self.status.configure(text=("已开启：按 EXIF 方向自动摆正，正在重读…"
+                                    if AUTO_EXIF else "已关闭：按文件里的原始方向读取…"))
+        if keep:
+            self._jump_to = os.path.normcase(os.path.abspath(keep))
+        if self.cur_folder and os.path.isdir(self.cur_folder):
+            self.load_folder(self.cur_folder, src=self.cur_src)
 
     def _on_batch_change(self, event=None):
         """下拉里换批次大小：下一批马上按新值读，不用重开这本"""
@@ -812,7 +860,7 @@ class ViewerApp(object):
     def _save_cfg(self):
         try:
             cfg = {"geometry": self.root.winfo_geometry(), "root_dir": self.root_dir,
-                   "batch": self.batch}
+                   "batch": self.batch, "autoexif": bool(self.autoexif.get())}
             with open(CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False)
         except Exception:

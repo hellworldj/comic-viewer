@@ -197,6 +197,35 @@ def check_final_order():
     assert imgs[-1] == "最终.png" and imgs[:2] == ["a.png", "b.png"], imgs
 
 
+def check_exif():
+    """EXIF 方向：默认不纠正，勾选后才按 EXIF 摆正"""
+    d = os.path.join(HERE, "_自检EXIF")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    p = os.path.join(d, "rotated.jpg")
+    if not os.path.exists(p):
+        im = Image.new("RGB", (300, 200), (200, 70, 70))
+        ex = Image.Exif()
+        ex[274] = 6                      # Orientation: 顺时针转 90°
+        im.save(p, "JPEG", quality=90, exif=ex)
+    mod.AUTO_EXIF = False
+    off_size = mod.read_size(p)
+    tf_off = mod.thumb_file(p)
+    page_off = mod.load_page_image(p, 300)
+    mod.AUTO_EXIF = True
+    on_size = mod.read_size(p)
+    tf_on = mod.thumb_file(p)
+    page_on = mod.load_page_image(p, 300)
+    print("[12] EXIF 方向：不勾 %s / 勾上 %s；缓存键 %s；页面高度 %d → %d"
+          % (off_size, on_size, "不同" if tf_off != tf_on else "相同",
+             page_off.size[1], page_on.size[1]))
+    assert off_size == (300, 200), "不勾时应按文件原始方向（横图）"
+    assert on_size == (200, 300), "勾上后应按 EXIF 变成竖图"
+    assert tf_off != tf_on, "两种模式的缩略图缓存不能混用"
+    assert page_on.size[1] > page_off.size[1]
+    mod.AUTO_EXIF = False
+
+
 def check_gui():
     import tkinter as tk
     root = tk.Tk()
@@ -419,6 +448,7 @@ if __name__ == "__main__":
     make_zip_multi()
     check_sort()
     check_final_order()
+    check_exif()
     check_thumbs()
     check_archives()
     check_gui()
