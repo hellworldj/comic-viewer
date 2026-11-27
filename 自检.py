@@ -158,6 +158,18 @@ def wait(root, sec):
         time.sleep(0.02)
 
 
+def make_batch_dir(n=12):
+    """一批 12 张的临时目录，用来验证「一次只读 5 张、滚到附近再读」"""
+    d = os.path.join(HERE, "_自检批次")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    for p in range(1, n + 1):
+        f = os.path.join(d, "p%02d.png" % p)
+        if not os.path.exists(f):
+            page_image("batch", p, (120, 160, 100)).save(f)
+    return d
+
+
 def check_gui():
     import tkinter as tk
     root = tk.Tk()
@@ -256,11 +268,11 @@ def check_gui():
     wait(root, 0.3)
     app._strip_scroll(6000)                 # 滚到最底 → 触发接下一个
     wait(root, 3.0)
-    print("[6] 连读：vol1 到底 → 已接 %d 段 / 共 %d 张，第二段是 %s"
+    print("[6] 连读：vol1 到底 → 已接 %d 段 / 共 %d 张，依次是 %s"
           % (len(app.albums), len(app.paths),
-             os.path.basename(app.albums[-1]["folder"])))
-    assert len(app.albums) == 2 and len(app.paths) == 6
-    assert os.path.basename(app.albums[-1]["folder"]) == "vol2"
+             [os.path.basename(a["folder"]) for a in app.albums]))
+    assert len(app.albums) >= 2
+    assert os.path.basename(app.albums[1]["folder"]) == "vol2", "vol1 之后应接 vol2"
 
     # 连读压缩包：漫画03 之后是 vol2.zip
     assert select_dir("漫画03"), "没找到 漫画03"
@@ -269,12 +281,11 @@ def check_gui():
     wait(root, 0.3)
     app._strip_scroll(6000)
     wait(root, 4.0)
-    print("    漫画03 到底 → 已接 %d 段 / 共 %d 张，末段来源 %s（%s）"
-          % (len(app.albums), len(app.paths), app.albums[-1]["kind"],
-             os.path.basename(app.albums[-1]["src"])))
+    print("    漫画03 到底 → 已接 %d 段，接上的是 %s"
+          % (len(app.albums), [os.path.basename(a["src"]) for a in app.albums[1:]]))
     assert len(app.albums) >= 2
-    assert app.albums[-1]["kind"] == "arch"
-    assert os.path.basename(app.albums[-1]["src"]).lower() == ZIP_NAME
+    assert any(a["kind"] == "arch" and os.path.basename(a["src"]).lower() == ZIP_NAME
+               for a in app.albums), "漫画03 之后应接上 vol2.zip"
 
     # 选中父目录（自己没有图）→ 自动进第一个有图的子目录，并沿子目录顺序读完
     app.tree.selection_set(root_item)
@@ -288,10 +299,10 @@ def check_gui():
     wait(root, 0.3)
     app._strip_scroll(6000)
     wait(root, 3.0)
-    print("    1 到底 → 接上 %s（共 %d 段）"
-          % (os.path.basename(app.albums[-1]["folder"]), len(app.albums)))
-    assert len(app.albums) == 2
-    assert os.path.basename(app.albums[-1]["folder"]) == "2", "应从同一层目录里接，不跳层"
+    print("    1 到底 → 依次 %s（共 %d 段）"
+          % ([os.path.basename(a["folder"]) for a in app.albums], len(app.albums)))
+    assert len(app.albums) >= 2
+    assert os.path.basename(app.albums[1]["folder"]) == "2", "应从同一层目录里接，不跳层"
 
     # 同一个包里有多话 → 包内接着读，而不是跳出包
     node2 = None
@@ -310,16 +321,39 @@ def check_gui():
     wait(root, 0.3)
     app._strip_scroll(6000)
     wait(root, 4.0)
-    print("    第1话 到底 → 接上包内 %s（%s，共 %d 段 / %d 张）"
-          % (os.path.basename(app.albums[-1]["folder"]), app.albums[-1]["kind"],
-             len(app.albums), len(app.paths)))
-    assert len(app.albums) == 2 and len(app.paths) == 4
-    assert os.path.basename(app.albums[-1]["folder"]) == "第2话"
-    assert app.albums[-1]["kind"] == "arch"
+    print("    第1话 到底 → 接上 %s（%s，共 %d 段 / %d 张）"
+          % ([os.path.basename(a["folder"]) for a in app.albums],
+             app.albums[1]["kind"], len(app.albums), len(app.paths)))
+    assert len(app.albums) >= 2 and len(app.paths) >= 4
+    assert os.path.basename(app.albums[1]["folder"]) == "第2话"
+    assert app.albums[1]["kind"] == "arch"
+
+    # 分批读取：一次只进来 5 张，滚到附近自动补下一批，全部读完才收尾
+    bdir = make_batch_dir(12)
+    app.autonext.set(0)                     # 这一段只验分批，不接别的目录
+    app.load_folder(bdir)
+    wait(root, 2.0)
+    print("[9] 分批：首屏载入 %d 张 / 共 %d 张，段数 %d，还剩 %d 张没读"
+          % (len(app.paths), app.total_hint, len(app.albums), len(app.pending)))
+    assert len(app.paths) == mod.BATCH and app.total_hint == 12
+    assert len(app.pending) == 12 - mod.BATCH
+    got = [len(app.paths)]
+    for _ in range(6):
+        app._goto_page(len(app.paths) - 1)
+        app._strip_scroll(8000)
+        wait(root, 1.6)
+        if len(app.paths) == got[-1] and not app.pending:
+            break
+        got.append(len(app.paths))
+    print("    往下滚时逐步长：%s，最终 %d 张 / 待读 %d 张"
+          % (got, len(app.paths), len(app.pending)))
+    assert got[0] == mod.BATCH and got == sorted(got) and got[-1] == 12
+    assert len(app.paths) == 12 and not app.pending and len(app.albums) == 1
+    assert app.paths == mod.list_images(bdir), "分批拼出来的顺序必须和目录里一致，不能重复/漏页"
+    app.autonext.set(1)
 
     root.destroy()
-    print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻） —— 全部正常")
-
+    print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻）、分批读取 —— 全部正常")
 
 if __name__ == "__main__":
     make_sample()

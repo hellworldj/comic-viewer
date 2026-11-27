@@ -9,6 +9,8 @@ config.json
 _run.log
 _run.out
 _tmp_zip_page.png
+_tmp_multi_page.png
+_自检批次/
 
 # 打包产物
 build/

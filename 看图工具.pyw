@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.4 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v1.5 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -61,6 +61,7 @@ THUMB_MAX = 148       # 缩略图长边像素
 BAND_H = 1000         # 超长页面分片显示的单片高度（避免一张图吃掉几百 MB）
 MAX_BASE = 2          # 解码后的整页缓存数量
 MAX_DEPTH = 12        # 解压后自动下钻的最大层数
+BATCH = 5             # 一次只读这么多张，滚到附近再读下一批（省内存、秒开）
 
 
 def resample_filter():
@@ -524,7 +525,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.4")
+        self.root.title("连续看图工具 v1.5")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -554,6 +555,9 @@ class ViewerApp(object):
         self._append_tries = 0
         self._attempted = set()       # 本次阅读里已经尝试过的接续目标
         self.last_src = None          # 最近一次接上的来源，避免重复接同一个
+        self.pending = []             # 当前这一本还没读进来的图片路径（每次只取 BATCH 张）
+        self._loading = False         # 正在后台量下一批尺寸 / 正在接下一本
+        self.total_hint = 0           # 当前这本总共多少张（只用于状态提示）
 
         self.geom = []
         self.ys = []
@@ -567,6 +571,7 @@ class ViewerApp(object):
 
         self._resize_job = None
         self._build_job = None
+        self._more_job = None          # 快到末尾时的预取定时器
         self._closing = False
 
         for d in (CACHE_DIR, WORK_DIR):
@@ -889,6 +894,10 @@ class ViewerApp(object):
         self._append_tries = 0
         self._attempted = set()
         self.last_src = None
+        self.pending = []
+        self._loading = False
+        self.total_hint = 0
+        self._more_job = None
         self.thumb_photos.clear()
         self.thumb_cell.clear()
         self.thumb_rect.clear()
@@ -939,7 +948,7 @@ class ViewerApp(object):
                     paths = list_images(folder)
         except Exception:
             paths = []
-        sizes = [read_size(p) for p in paths]
+        sizes = [read_size(p) for p in paths[:BATCH]]   # 只量首批，其余等滚到再量
         self.q.put(("scan", token, folder, paths, sizes))
 
     def _thumb_worker(self, token, paths, offset=0):
@@ -977,9 +986,13 @@ class ViewerApp(object):
                                               % (len(self.paths), max(1, len(self.albums)),
                                                  len(self.thumb_photos)))
                 elif kind == "append":
-                    _, token, kind2, src, folder, paths, sizes, err = msg
+                    _, token, kind2, src, folder, chunk, sizes, rest, err = msg
                     if token == self.token:
-                        self._on_append_done(kind2, src, folder, paths, sizes, err)
+                        self._on_append_done(kind2, src, folder, chunk, sizes, rest, err)
+                elif kind == "grow":
+                    _, token, mode, kind2, src, folder, chunk, sizes, err = msg
+                    if token == self.token:
+                        self._on_grow(mode, kind2, src, folder, chunk, sizes, err)
                 elif kind == "archive":
                     _, token, iid, path, dest, err = msg
                     if token == self.token:
@@ -995,19 +1008,34 @@ class ViewerApp(object):
             pass
         self.root.after(60, self._poll)
 
+    def _batch_worker(self, token, chunk, mode, kind, src, folder):
+        """只把这一批的尺寸量出来（不读像素），量完就交给主线程拼接"""
+        try:
+            sizes = [read_size(p) for p in chunk]
+            err = None
+        except Exception as e:
+            sizes = [(0, 0)] * len(chunk)
+            err = str(e)
+        self.q.put(("grow", token, mode, kind, src, folder, chunk, sizes, err))
+
     def _on_scan_done(self, folder, paths, sizes):
-        self.paths = paths
-        self.sizes = sizes
         if not paths:
             self.status.configure(text="这个位置没有图片：%s（如果是压缩包，展开左栏点进去）"
                                   % folder)
             return
+        total = len(paths)
+        self.paths = paths[:BATCH]
+        self.sizes = sizes[:BATCH]
+        self.pending = paths[BATCH:]
         self.albums = [{"kind": self.cur_src[0], "src": self.cur_src[1], "folder": folder,
-                        "start": 0, "end": len(paths)}]
+                        "start": 0, "end": len(self.paths)}]
         self._appending = False
+        self._loading = False
         self._append_tries = 0
         self.last_src = self.cur_src
-        self.status.configure(text="共 %d 张图片，正在生成缩略图…" % len(paths))
+        self.total_hint = total
+        self.status.configure(text="%d 张图片 · 先读前 %d 张，正在生成缩略图…"
+                              % (total, len(self.paths)))
         self._build_thumb_cells()
         self._layout_strip()
         self.strip.yview_moveto(0.0)
@@ -1201,6 +1229,16 @@ class ViewerApp(object):
         except Exception:
             return False
 
+    def _near_bottom(self):
+        """离底部不足两张的高度（算「快到结尾」）"""
+        try:
+            top = self.strip.canvasy(0)
+            vh = self.strip.winfo_height()
+            page = self.strip_total / max(1, len(self.paths))
+            return top + vh >= self.strip_total - 2 * page - 40
+        except Exception:
+            return False
+
     def _inner_root(self, kind, src):
         return extract_dir_for(src) if kind == "arch" else src
 
@@ -1238,10 +1276,29 @@ class ViewerApp(object):
             node = parent
         return None
 
-    def _maybe_append(self):
-        if not self.autonext.get() or not self.paths or self._appending or not self.albums:
+    def _maybe_more(self, near=False):
+        """还有没读进来的图就读下一批；这一本读完了就按目录树接下一本"""
+        if self._loading or not self.paths:
             return
-        if self._append_tries > 8 or not self._bottom_reached():
+        if self.pending:
+            chunk = self.pending[:BATCH]
+            self.pending = self.pending[BATCH:]
+            self._loading = True
+            self.status.configure(text="读取中…（本批 %d 张，这本还剩 %d 张没读）"
+                                  % (len(chunk), len(self.pending)))
+            threading.Thread(target=self._batch_worker,
+                             args=(self.token, chunk, "same", None, None, None),
+                             daemon=True).start()
+            return
+        if near or self._bottom_reached():
+            if near and not self._bottom_reached() and not self._near_bottom():
+                return
+            self._maybe_append()
+
+    def _maybe_append(self):
+        if not self.autonext.get() or not self.paths or self._loading or not self.albums:
+            return
+        if self._append_tries > 8:
             return
         target = self._next_target()
         if not target:
@@ -1253,37 +1310,42 @@ class ViewerApp(object):
             return
         self._attempted.add(key)
         self._append_tries += 1
+        self._loading = True
         self._appending = True
         name = os.path.basename(os.path.normpath(folder or src))
-        self.status.configure(text="读到末尾，正在接下一个：%s …" % name)
+        self.status.configure(text="正在接下一个：%s …" % name)
         threading.Thread(target=self._append_worker,
                          args=(self.token, kind, src, folder), daemon=True).start()
 
     def _append_worker(self, token, kind, src, folder):
+        """接下一本：只解压 / 扫名字 / 量前 BATCH 张尺寸，剩下的留到后面再读"""
         try:
             root = extract_dir_for(src) if kind == "arch" else src
             if kind == "arch" and not os.path.exists(os.path.join(root, ".done")):
                 extract_archive(src, root)
             if folder is None:
                 folder = first_dir_with_images(root)
-            paths = list_images(folder) if folder else []
-            sizes = [read_size(p) for p in paths]
-            self.q.put(("append", token, kind, src, folder, paths, sizes, None))
+            all_paths = list_images(folder) if folder else []
+            chunk = all_paths[:BATCH]
+            sizes = [read_size(p) for p in chunk]
+            self.q.put(("append", token, kind, src, folder, chunk, sizes,
+                        all_paths[BATCH:], None))
         except Exception as e:
-            self.q.put(("append", token, kind, src, None, [], [], str(e)))
+            self.q.put(("append", token, kind, src, None, [], [], [], str(e)))
 
-    def _on_append_done(self, kind, src, folder, paths, sizes, err):
+    def _on_append_done(self, kind, src, folder, chunk, sizes, rest, err):
+        self._loading = False
         self._appending = False
         if err:
             self.status.configure(text="接下一个失败：%s" % str(err).splitlines()[0])
             return
-        if not paths:
+        if not chunk:
             self.status.configure(text="跳过没有图片的位置：%s"
                                   % os.path.basename(os.path.normpath(folder or src)))
             self._maybe_append()
             return
         start = len(self.paths)
-        self.paths.extend(paths)
+        self.paths.extend(chunk)
         self.sizes.extend(sizes)
         self.albums.append({"kind": kind, "src": src, "folder": folder,
                             "start": start, "end": len(self.paths)})
@@ -1291,17 +1353,49 @@ class ViewerApp(object):
             self.archive_map[os.path.abspath(extract_dir_for(src))] = src
         self.last_src = (kind, src)
         self._append_tries = 0
+        self.pending = rest
         self._extend_layout(start)
         self._append_thumb_cells(start)
         self._strip_sync()
-        threading.Thread(target=self._thumb_worker, args=(self.token, paths, start),
+        threading.Thread(target=self._thumb_worker, args=(self.token, chunk, start),
                          daemon=True).start()
-        self.status.configure(text="已接上：%s（当前共 %d 张 / %d 段）"
+        self.status.configure(text="已接上：%s（+%d 张，读到的共 %d 张 / %d 段）"
                               % (os.path.basename(os.path.normpath(folder)),
-                                 len(self.paths), len(self.albums)))
+                                 len(chunk), len(self.paths), len(self.albums)))
+
+    def _on_grow(self, mode, kind, src, folder, chunk, sizes, err):
+        """同一本的后一批 / 另一本的第一批已经量好尺寸，接进长图"""
+        self._loading = False
+        if err or not chunk:
+            if mode == "same":
+                self.pending = []
+            return
+        start = len(self.paths)
+        self.paths.extend(chunk)
+        self.sizes.extend(sizes)
+        if mode == "same" and self.albums:
+            self.albums[-1]["end"] = len(self.paths)
+        else:
+            self.albums.append({"kind": kind, "src": src, "folder": folder,
+                                "start": start, "end": len(self.paths)})
+            if kind == "arch":
+                self.archive_map[os.path.abspath(extract_dir_for(src))] = src
+            self.last_src = (kind, src)
+        self._extend_layout(start)
+        self._append_thumb_cells(start)
+        self._strip_sync()
+        threading.Thread(target=self._thumb_worker, args=(self.token, chunk, start),
+                         daemon=True).start()
+        left = len(self.pending)
+        self.status.configure(text="已载入 %d 张%s" % (
+            len(self.paths), ("，这本还剩 %d 张" % left) if left else "（这本读完）"))
 
     def _extend_layout(self, start):
         c = self.strip
+        try:
+            keep_top = c.canvasy(0)      # 追加内容时保住当前滚动位置，别让视图跳走
+        except Exception:
+            keep_top = 0
         cw = max(40, c.winfo_width())
         y = self.strip_total
         for i in range(start, len(self.sizes)):
@@ -1318,6 +1412,11 @@ class ViewerApp(object):
             y += dh
         self.strip_total = max(1, y)
         c.configure(scrollregion=(0, 0, max(cw, self.dw), self.strip_total))
+        try:
+            c.yview_moveto(min(keep_top, max(0, self.strip_total - 1))
+                           / max(1.0, float(self.strip_total)))
+        except Exception:
+            pass
 
     def _append_thumb_cells(self, start):
         c = self.thumb_canvas
@@ -1447,7 +1546,7 @@ class ViewerApp(object):
         c.yview_moveto(new / max(1.0, float(self.strip_total)))
         self._strip_sync()
         if dy > 0:
-            self._maybe_append()
+            self._maybe_more()
         return "break"
 
     def _goto_page(self, idx):
@@ -1538,6 +1637,27 @@ class ViewerApp(object):
                         pass
                     self.page_photos.pop(key, None)
 
+        # 快到这一本末尾（还差 3 张以内）就提前备好下一批 / 下一本，滑到底没有等待
+        top = c.canvasy(0)
+        if self.pending:
+            if cur >= len(self.paths) - 3:
+                self._schedule_more()
+        elif self.autonext.get() and top > 1 and self._near_bottom():
+            self._schedule_more()
+
+    def _schedule_more(self):
+        if self._more_job is not None:
+            return
+
+        def run():
+            self._more_job = None
+            self._maybe_more(near=True)
+
+        try:
+            self._more_job = self.root.after(80, run)
+        except Exception:
+            self._more_job = None
+
     def _draw_page_band(self, key):
         i, b = key
         if i >= len(self.paths):
@@ -1601,7 +1721,9 @@ class ViewerApp(object):
                         width=2 if i == idx else 1)
                 except Exception:
                     pass
-        self.pos_var.set("第 %d / %d 页" % (idx + 1 if idx >= 0 else 0, len(self.paths)))
+        self.pos_var.set("第 %d / %d 页%s" % (
+            idx + 1 if idx >= 0 else 0, len(self.paths),
+            ("（后面还有 %d 张没读）" % len(self.pending)) if self.pending else ""))
 
     # ------------------------------------------------------------ 关闭
 
