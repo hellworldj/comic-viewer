@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.2 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.3 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -25,6 +25,7 @@ import zipfile
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import font as tkfont
 
 try:
     from PIL import Image, ImageTk, ImageOps
@@ -52,8 +53,111 @@ ARCH_EXT = {".zip", ".cbz", ".rar", ".cbr", ".7z"}
 
 NUM_RE = re.compile(r"(\d+)")
 
-FONT_UI = ("Microsoft YaHei", 9)
-FONT_SMALL = ("Microsoft YaHei", 8)
+# 字体：全部走「命名字体」，改字号时所有控件一次性跟着变，不用重建界面
+FONT_UI = "PVUI"
+FONT_SMALL = "PVSMALL"
+FONT_LEVELS = (("小", 1.00), ("标准", 1.16), ("大", 1.34), ("超大", 1.52))
+FONT_LEVEL = "标准"
+FONT_DPISCALE = 1.0
+UI_PX = 12            # 小字号下界面文字像素高
+SMALL_PX = 11         # 小字号下辅助文字像素高
+
+
+def font_scale():
+    return dict(FONT_LEVELS).get(FONT_LEVEL, 1.16) * FONT_DPISCALE
+
+
+def ui_px():
+    return max(9, int(round(UI_PX * font_scale())))
+
+
+def small_px():
+    return max(8, int(round(SMALL_PX * font_scale())))
+
+
+def row_height():
+    return int(round(ui_px() * 1.8)) + 2
+
+
+def _named_font(root, name, px, weight="normal"):
+    """同名命名字体存在就改写，不存在就新建。
+    直接走 Tcl，不建 Python Font 对象（Font 对象一被回收会把字体一起删掉）。"""
+    try:
+        names = root.tk.splitlist(root.tk.call("font", "names"))
+        if name not in names:
+            root.tk.call("font", "create", name, "-family", "Microsoft YaHei",
+                         "-size", -int(px), "-weight", weight)
+        else:
+            root.tk.call("font", "configure", name, "-family", "Microsoft YaHei",
+                         "-size", -int(px), "-weight", weight)
+    except Exception:
+        pass
+
+
+def apply_tree_style(root):
+    try:
+        style = ttk.Style(root)
+        style.configure("Treeview", font=FONT_UI, rowheight=row_height())
+        style.configure("Treeview.Heading", font=FONT_UI)
+    except Exception:
+        pass
+
+
+def setup_fonts(root, level=None):
+    """按「屏幕 DPI × 字号档位」重算所有字体；已建好的界面会立刻跟着变"""
+    global FONT_LEVEL, FONT_DPISCALE
+    if level in dict(FONT_LEVELS):
+        FONT_LEVEL = level
+    try:
+        FONT_DPISCALE = max(1.0, min(2.0, float(root.winfo_fpixels("1i")) / 96.0))
+    except Exception:
+        FONT_DPISCALE = 1.0
+    u = ui_px()
+    _named_font(root, FONT_UI, u)
+    _named_font(root, FONT_SMALL, small_px())
+    # 系统自带的那几个命名字体也一起放大：右键菜单、对话框、消息框都靠它们
+    for nm, px in (("TkDefaultFont", u), ("TkTextFont", u), ("TkMenuFont", u),
+                   ("TkHeadingFont", u), ("TkCaptionFont", u),
+                   ("TkSmallCaptionFont", max(8, u - 2)), ("TkTooltipFont", u),
+                   ("TkFixedFont", u)):
+        try:
+            _named_font(root, nm, px)
+        except Exception:
+            pass
+    apply_tree_style(root)
+
+
+def clamp_geometry(root, geo):
+    """把 config 里的窗口位置夹回屏幕内：换分辨率/换缩放比例后不会跑到屏幕外或撑破"""
+    try:
+        m = re.match(r"(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?", geo.strip())
+        if not m:
+            return "1360x880"
+        w = int(m.group(1))
+        h = int(m.group(2))
+        x = int(m.group(3) or 0)
+        y = int(m.group(4) or 0)
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        w = max(640, min(w, sw - 20))
+        h = max(400, min(h, sh - 80))
+        x = max(0, min(x, sw - w))
+        y = max(0, min(y, sh - h - 40))
+        return "%dx%d+%d+%d" % (w, h, x, y)
+    except Exception:
+        return "1360x880"
+
+
+def auto_font_level(root):
+    try:
+        w = root.winfo_screenwidth()
+    except Exception:
+        w = 1920
+    if w >= 3000:
+        return "大"
+    if w >= 2400:
+        return "标准"
+    return "标准"
 
 CELL_W = 162          # 缩略图格子宽
 CELL_H = 196          # 缩略图格子高
@@ -585,7 +689,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.2")
+        self.root.title("连续看图工具 v2.3")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -659,6 +763,11 @@ class ViewerApp(object):
         bar = tk.Frame(self.root)
         bar.pack(side="top", fill="x")
         self.bar = bar
+        # 两行工具条：字放大后一行塞不下时，第二行不会被裁掉
+        bar1 = tk.Frame(bar)
+        bar1.pack(side="top", fill="x")
+        bar2 = tk.Frame(bar)
+        bar2.pack(side="top", fill="x")
 
         # 底部状态栏先占位：先 pack 到底部，三栏（expand）才不会把它挤没
         self.status_bar = tk.Frame(self.root, bd=1, relief="sunken")
@@ -670,61 +779,70 @@ class ViewerApp(object):
         self.status.pack(side="left", padx=8)
         self.info.pack(side="right", padx=8)
 
-        self.btn_open = tk.Button(bar, text="打开目录", command=self.choose_dir, font=FONT_UI)
+        self.btn_open = tk.Button(bar1, text="打开目录", command=self.choose_dir, font=FONT_UI)
         self.btn_open.pack(side="left", padx=(8, 4), pady=5)
 
-        self.btn_refresh = tk.Button(bar, text="刷新", command=self.refresh, font=FONT_UI)
+        self.btn_refresh = tk.Button(bar1, text="刷新", command=self.refresh, font=FONT_UI)
         self.btn_refresh.pack(side="left", padx=4, pady=5)
 
-        tk.Label(bar, text="｜", fg="#bbb").pack(side="left")
+        tk.Label(bar1, text="｜", fg="#bbb").pack(side="left")
 
-        tk.Button(bar, text="↺ 左转", command=lambda: self.rotate_page(-90),
+        tk.Button(bar1, text="↺ 左转", command=lambda: self.rotate_page(-90),
                   font=FONT_UI).pack(side="left", padx=2, pady=5)
-        tk.Button(bar, text="↻ 右转", command=lambda: self.rotate_page(90),
+        tk.Button(bar1, text="↻ 右转", command=lambda: self.rotate_page(90),
                   font=FONT_UI).pack(side="left", padx=2, pady=5)
         self.apply_all = tk.BooleanVar(value=True)
-        tk.Checkbutton(bar, text="整本", variable=self.apply_all,
+        tk.Checkbutton(bar1, text="整本", variable=self.apply_all,
                        font=FONT_UI).pack(side="left", padx=2)
 
-        tk.Label(bar, text="｜", fg="#bbb").pack(side="left")
+        tk.Label(bar1, text="｜", fg="#bbb").pack(side="left")
 
-        tk.Button(bar, text="－", width=3, command=lambda: self.zoom_by(0.8),
+        tk.Button(bar1, text="－", width=3, command=lambda: self.zoom_by(0.8),
                   font=FONT_UI).pack(side="left", padx=2, pady=5)
         self.zoom_var = tk.StringVar(value="100%")
-        tk.Label(bar, textvariable=self.zoom_var, width=5,
+        tk.Label(bar1, textvariable=self.zoom_var, width=5,
                  font=FONT_UI).pack(side="left")
-        tk.Button(bar, text="＋", width=3, command=lambda: self.zoom_by(1.25),
+        tk.Button(bar1, text="＋", width=3, command=lambda: self.zoom_by(1.25),
                   font=FONT_UI).pack(side="left", padx=2, pady=5)
-        tk.Button(bar, text="适应", command=self.zoom_fit,
+        tk.Button(bar1, text="适应", command=self.zoom_fit,
                   font=FONT_UI).pack(side="left", padx=(2, 6), pady=5)
 
         self.autonext = tk.BooleanVar(value=True)
-        tk.Checkbutton(bar, text="连读下一个", variable=self.autonext,
+        tk.Checkbutton(bar1, text="连读下一个", variable=self.autonext,
                        font=FONT_UI).pack(side="left", padx=2)
 
         self.autoexif = tk.IntVar(value=0)
-        tk.Checkbutton(bar, text="自动纠正方向", variable=self.autoexif,
+        tk.Checkbutton(bar1, text="自动纠正方向", variable=self.autoexif,
                        command=self._on_autoexif_change,
                        font=FONT_UI).pack(side="left", padx=2)
 
-        tk.Label(bar, text="每批", font=FONT_UI).pack(side="left", padx=(8, 2))
+        tk.Label(bar2, text="每批", font=FONT_UI).pack(side="left", padx=(8, 2))
         self.batch_var = tk.StringVar(value=str(self.batch))
-        self.batch_box = ttk.Combobox(bar, textvariable=self.batch_var, width=4,
+        self.batch_box = ttk.Combobox(bar2, textvariable=self.batch_var, width=4,
                                       values=("5", "10", "20"), state="readonly",
                                       font=FONT_UI)
         self.batch_box.pack(side="left", padx=2, pady=4)
         self.batch_box.bind("<<ComboboxSelected>>", self._on_batch_change)
-        tk.Label(bar, text="张", font=FONT_UI).pack(side="left")
+        tk.Label(bar2, text="张", font=FONT_UI).pack(side="left")
+
+        # 字号档位：小 / 标准 / 大 / 超大
+        self.font_var = tk.StringVar(value=FONT_LEVEL)
+        self.font_box = ttk.Combobox(bar2, textvariable=self.font_var, width=5,
+                                     values=tuple(n for n, _ in FONT_LEVELS),
+                                     state="readonly", font=FONT_UI)
+        self.font_box.pack(side="left", padx=(10, 2), pady=4)
+        self.font_box.bind("<<ComboboxSelected>>", self._on_font_change)
+        tk.Label(bar2, text="字号", font=FONT_SMALL, fg="#555").pack(side="left", padx=(6, 2))
 
         self.pos_var = tk.StringVar(value="第 0 / 0 页")
-        tk.Label(bar, textvariable=self.pos_var, width=13, anchor="w",
+        tk.Label(bar2, textvariable=self.pos_var, width=13, anchor="w",
                  font=FONT_UI).pack(side="left", padx=6)
 
         self.path_var = tk.StringVar(value="请选择漫画根目录")
-        tk.Label(bar, textvariable=self.path_var, font=FONT_SMALL,
+        tk.Label(bar2, textvariable=self.path_var, font=FONT_SMALL,
                  fg="#666", anchor="w").pack(side="left", fill="x", expand=True, padx=6)
 
-        tk.Label(bar, text="滚轮上下连续浏览 · Ctrl+滚轮缩放", font=FONT_SMALL,
+        tk.Label(bar2, text="滚轮上下连续浏览 · Ctrl+滚轮缩放", font=FONT_SMALL,
                  fg="#888").pack(side="right", padx=10)
 
         paned = tk.PanedWindow(self.root, orient="horizontal",
@@ -793,7 +911,7 @@ class ViewerApp(object):
             style.theme_use("vista" if sys.platform == "win32" else "clam")
         except Exception:
             pass
-        style.configure("Treeview", font=FONT_UI, rowheight=22)
+        apply_tree_style(self.root)
 
     # ------------------------------------------------------------ 配置
 
@@ -803,10 +921,11 @@ class ViewerApp(object):
                 cfg = json.load(f)
         except Exception:
             cfg = {}
+        self._cfg = dict(cfg) if isinstance(cfg, dict) else {}
         geo = cfg.get("geometry")
         if isinstance(geo, str) and "x" in geo:
             try:
-                self.root.geometry(geo)
+                self.root.geometry(clamp_geometry(self.root, geo))
             except Exception:
                 self.root.geometry("1360x880")
         else:
@@ -829,6 +948,11 @@ class ViewerApp(object):
         except Exception:
             pass
         AUTO_EXIF = auto_exif
+        # 字号档位：main() 里已经按 config 设过字体，这里只同步下拉框
+        try:
+            self.font_var.set(FONT_LEVEL)
+        except Exception:
+            pass
 
     def _on_autoexif_change(self):
         """勾选/取消「自动纠正方向」：立即按新方向重读当前这本"""
@@ -857,10 +981,24 @@ class ViewerApp(object):
         if self.pending or self.paths:
             self._maybe_more()
 
+    def _on_font_change(self, event=None):
+        """下拉里换字号：命名字体一改，工具栏/树/状态栏/菜单全部即时跟着变"""
+        level = self.font_var.get()
+        setup_fonts(self.root, level)
+        self._save_cfg()
+        self.status.configure(text="字号：%s（工具条太挤就把窗口拖宽一点）" % level)
+        self.root.update_idletasks()
+        if 0 <= self.cur_index < len(self.paths):
+            self._strip_sync(force=True)
+
     def _save_cfg(self):
         try:
-            cfg = {"geometry": self.root.winfo_geometry(), "root_dir": self.root_dir,
-                   "batch": self.batch, "autoexif": bool(self.autoexif.get())}
+            cfg = dict(getattr(self, "_cfg", {}) or {})     # 保留其它键，别把 root_dir 写丢
+            cfg.update({"geometry": self.root.winfo_geometry(),
+                        "root_dir": self.root_dir or cfg.get("root_dir", ""),
+                        "batch": self.batch, "autoexif": bool(self.autoexif.get()),
+                        "font": FONT_LEVEL})
+            self._cfg = dict(cfg)
             with open(CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False)
         except Exception:
@@ -880,6 +1018,11 @@ class ViewerApp(object):
             bm.add_radiobutton(label="每批 %d 张" % n, value=str(n),
                                variable=self.batch_var, command=self._on_batch_change)
         m.add_cascade(label="每批张数（当前 %d）" % self.batch, menu=bm)
+        fm = tk.Menu(m, tearoff=0)
+        for name, _ in FONT_LEVELS:
+            fm.add_radiobutton(label="字号 %s" % name, value=name,
+                               variable=self.font_var, command=self._on_font_change)
+        m.add_cascade(label="字号（当前 %s）" % FONT_LEVEL, menu=fm)
         m.add_separator()
         m.add_command(label="放大", command=lambda: self.zoom_by(1.15))
         m.add_command(label="缩小", command=lambda: self.zoom_by(0.87))
@@ -2067,18 +2210,33 @@ class ViewerApp(object):
 
 def main():
     root = tk.Tk()
+    # DPI 感知按原来的时机设置（放在建 Tk 之后），保证窗口尺寸/位置和以前一致
+    try:
+        if sys.platform == "win32":
+            from ctypes import windll
+            try:
+                windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
     if not HAS_PIL:
         root.withdraw()
         messagebox.showerror("缺少依赖",
                              "本工具需要 Pillow 库。\n\n请在命令行执行：\n\n"
                              "pip install pillow\n\n安装后重新打开。")
         return
+    # 先按 config 里的字号档位把命名字体建好，控件一建出来就是大字体
+    lv = None
     try:
-        if sys.platform == "win32":
-            from ctypes import windll
-            windll.user32.SetProcessDPIAware()
+        with open(CFG_PATH, "r", encoding="utf-8") as f:
+            lv = json.load(f).get("font")
     except Exception:
-        pass
+        lv = None
+    if lv not in dict(FONT_LEVELS):
+        lv = auto_font_level(root)
+    setup_fonts(root, lv)
+
     app = ViewerApp(root)
     # 支持命令行直接带目录/压缩包：看图工具.exe "D:\漫画\某作品"  /  "D:\漫画\vol1.zip"
     if len(sys.argv) > 1:

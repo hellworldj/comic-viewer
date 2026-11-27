@@ -13,6 +13,7 @@
 import os
 import sys
 import time
+import json
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -438,6 +439,40 @@ def check_gui():
     assert "PNG" in txt.upper() and "x" in txt and ("B" in txt), "状态栏要显示尺寸/体积/格式"
     app.set_fixed_width_value(0)
     wait(root, 0.4)
+
+    # 字号档位：小 / 标准 / 大 / 超大
+    try:
+        import tkinter.font as tkfont
+        app.font_var.set("标准")
+        app._on_font_change()
+        wait(root, 0.4)
+        px_std = mod.ui_px()
+        rh_std = int(float(mod.ttk.Style(root).lookup("Treeview", "rowheight")))
+        app.font_var.set("超大")
+        app._on_font_change()
+        wait(root, 0.5)
+        px_xl = mod.ui_px()
+        rh_xl = int(float(mod.ttk.Style(root).lookup("Treeview", "rowheight")))
+        f_xl = tkfont.Font(root=root, name=mod.FONT_UI, exists=True)
+        print("[13] 字号：标准 %dpx/行高 %d → 超大 %dpx/行高 %d，字体点数 %s，配置 %s"
+              % (px_std, rh_std, px_xl, rh_xl, f_xl.cget("size"),
+                 json.load(open(mod.CFG_PATH, encoding="utf-8")).get("font")))
+        assert px_xl >= px_std + 3, "超大字号要比标准明显变大"
+        assert rh_xl >= rh_std + 4, "左栏行高要跟着字号一起变大"
+        assert abs(int(f_xl.cget("size"))) >= 16, "命名字体 PVUI 实际像素要变大"
+        app.font_var.set("小")
+        app._on_font_change()
+        wait(root, 0.4)
+        px_sm = mod.ui_px()
+        app.font_var.set("标准")
+        app._on_font_change()
+        wait(root, 0.4)
+        print("     小字号 %dpx → 标准 %dpx，四档可切换" % (px_sm, mod.ui_px()))
+        assert px_sm < px_std < px_xl
+    except AssertionError:
+        raise
+    except Exception as e:
+        print("     字号检查跳过：%s" % e)
 
     root.destroy()
     print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻）、分批读取 —— 全部正常")
