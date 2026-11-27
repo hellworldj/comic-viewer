@@ -222,8 +222,44 @@ def check_gui():
     assert len(app.paths) == 3
     assert app.cur_folder and app.cur_folder.startswith(mod.WORK_DIR)
 
+    # 连读：读到最后一页自动接下一个文件夹（vol1 → vol2）
+    def select_dir(name):
+        for c in app.tree.get_children(root_item):
+            if os.path.basename(app.tree_paths.get(c, "")) == name:
+                app.tree.selection_set(c)
+                app.tree.focus(c)
+                return True
+        return False
+
+    assert select_dir("vol1"), "没找到 vol1"
+    wait(root, 2.5)
+    assert len(app.paths) == 3 and len(app.albums) == 1
+    app._goto_page(len(app.paths) - 1)
+    wait(root, 0.3)
+    app._strip_scroll(6000)                 # 滚到最底 → 触发接下一个
+    wait(root, 3.0)
+    print("[6] 连读：vol1 到底 → 已接 %d 段 / 共 %d 张，第二段是 %s"
+          % (len(app.albums), len(app.paths),
+             os.path.basename(app.albums[-1]["folder"])))
+    assert len(app.albums) == 2 and len(app.paths) == 6
+    assert os.path.basename(app.albums[-1]["folder"]) == "vol2"
+
+    # 连读压缩包：漫画03 之后是 vol2.zip
+    assert select_dir("漫画03"), "没找到 漫画03"
+    wait(root, 2.5)
+    app._goto_page(len(app.paths) - 1)
+    wait(root, 0.3)
+    app._strip_scroll(6000)
+    wait(root, 4.0)
+    print("    漫画03 到底 → 已接 %d 段 / 共 %d 张，末段来源 %s（%s）"
+          % (len(app.albums), len(app.paths), app.albums[-1]["kind"],
+             os.path.basename(app.albums[-1]["src"])))
+    assert len(app.albums) >= 2
+    assert app.albums[-1]["kind"] == "arch"
+    assert os.path.basename(app.albums[-1]["src"]).lower() == ZIP_NAME
+
     root.destroy()
-    print("    三栏界面、旋转、缩放、zip 读取 —— 全部正常")
+    print("    三栏界面、旋转、缩放、zip 读取、连读 —— 全部正常")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.2 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v1.3 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -491,13 +491,52 @@ def find_first_image_dir(root, max_depth=MAX_DEPTH):
     return None
 
 
+def first_album_in(kind, path, depth=0):
+    """一个条目（文件夹/压缩包）里第一处有图片的位置"""
+    if kind == "arch":
+        return ("arch", path)
+    if list_images(path):
+        return ("dir", path)
+    if depth >= 3:
+        return None
+    for name in list_subdirs(path):
+        got = first_album_in("dir", os.path.join(path, name), depth + 1)
+        if got:
+            return got
+    return None
+
+
+def find_next_source(kind, path):
+    """按「同级自然顺序 → 没有就上溯一层」找下一个有图的位置"""
+    node, node_kind = path, kind
+    for _ in range(8):
+        parent = os.path.dirname(os.path.abspath(node))
+        if not parent or os.path.normcase(parent) == os.path.normcase(node):
+            return None
+        entries = list_entries(parent)
+        cur = os.path.normcase(os.path.abspath(node))
+        idx = -1
+        for i, e in enumerate(entries):
+            if os.path.normcase(os.path.abspath(e[2])) == cur:
+                idx = i
+                break
+        if idx == -1:
+            return None
+        for e in entries[idx + 1:]:
+            got = first_album_in(e[0], e[2])
+            if got:
+                return got
+        node, node_kind = parent, "dir"
+    return None
+
+
 # ---------------------------------------------------------------- 主程序
 
 class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.2")
+        self.root.title("连续看图工具 v1.3")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -518,6 +557,13 @@ class ViewerApp(object):
         self.zoom = 1.0               # 1.0 = 适应宽度
         self.dw = 700
         self.off_x = 0
+
+        # 连读（读到最后一页自动接下一个文件夹/压缩包）
+        self.albums = []              # [{kind, src, folder, start, end}]
+        self.cur_src = None           # 当前来源 ('dir'|'arch', path)
+        self._appending = False
+        self._append_tries = 0
+        self.last_src = None          # 最近一次接上的来源，避免重复接同一个
 
         self.geom = []
         self.ys = []
@@ -579,6 +625,10 @@ class ViewerApp(object):
                   font=FONT_UI).pack(side="left", padx=2, pady=5)
         tk.Button(bar, text="适应", command=self.zoom_fit,
                   font=FONT_UI).pack(side="left", padx=(2, 6), pady=5)
+
+        self.autonext = tk.BooleanVar(value=True)
+        tk.Checkbutton(bar, text="连读下一个", variable=self.autonext,
+                       font=FONT_UI).pack(side="left", padx=2)
 
         self.pos_var = tk.StringVar(value="第 0 / 0 页")
         tk.Label(bar, textvariable=self.pos_var, width=13, anchor="w",
@@ -819,7 +869,7 @@ class ViewerApp(object):
                     break
         self.tree.selection_set(node)
         self.tree.focus(node)
-        self.load_folder(self.tree_paths.get(node, dest))
+        self.load_folder(self.tree_paths.get(node, dest), src=("arch", path))
 
     def open_archive_path(self, path):
         """命令行直接打开某个压缩包：先打开它所在目录，再选中并解压这个包"""
@@ -843,6 +893,10 @@ class ViewerApp(object):
     def _clear_views(self):
         self.paths = []
         self.sizes = []
+        self.albums = []
+        self.cur_src = None
+        self._appending = False
+        self.last_src = None
         self.thumb_photos.clear()
         self.thumb_cell.clear()
         self.thumb_rect.clear()
@@ -860,11 +914,12 @@ class ViewerApp(object):
         self.strip.delete("all")
         self.strip.configure(scrollregion=(0, 0, 1, 1))
 
-    def load_folder(self, folder):
+    def load_folder(self, folder, src=None):
         self.token += 1
         token = self.token
         self.cur_folder = folder
         self._clear_views()
+        self.cur_src = src if src else ("dir", folder)
         short = os.path.basename(os.path.normpath(folder)) or folder
         self.status.configure(text="正在读取：%s …" % short)
         t = threading.Thread(target=self._scan_worker, args=(folder, token), daemon=True)
@@ -878,7 +933,7 @@ class ViewerApp(object):
         sizes = [read_size(p) for p in paths]
         self.q.put(("scan", token, folder, paths, sizes))
 
-    def _thumb_worker(self, token, paths):
+    def _thumb_worker(self, token, paths, offset=0):
         for i, p in enumerate(paths):
             if token != self.token:
                 return
@@ -886,8 +941,8 @@ class ViewerApp(object):
                 make_thumb(p)
             except Exception:
                 continue
-            self.q.put(("thumb", token, i))
-        self.q.put(("thumb_done", token, len(paths)))
+            self.q.put(("thumb", token, i + offset))
+        self.q.put(("thumb_done", token, len(self.paths)))
 
     # ------------------------------------------------------------ 消息循环
 
@@ -909,8 +964,13 @@ class ViewerApp(object):
                 elif kind == "thumb_done":
                     _, token, n = msg
                     if token == self.token:
-                        self.status.configure(text="已载入 %d 张图片 · 缩略图缓存 %d 张"
-                                              % (len(self.paths), len(self.thumb_photos)))
+                        self.status.configure(text="已载入 %d 张图片（%d 段）· 缩略图缓存 %d 张"
+                                              % (len(self.paths), max(1, len(self.albums)),
+                                                 len(self.thumb_photos)))
+                elif kind == "append":
+                    _, token, kind2, src, folder, paths, sizes, err = msg
+                    if token == self.token:
+                        self._on_append_done(kind2, src, folder, paths, sizes, err)
                 elif kind == "archive":
                     _, token, iid, path, dest, err = msg
                     if token == self.token:
@@ -933,6 +993,11 @@ class ViewerApp(object):
             self.status.configure(text="这个位置没有图片：%s（如果是压缩包，展开左栏点进去）"
                                   % folder)
             return
+        self.albums = [{"kind": self.cur_src[0], "src": self.cur_src[1], "folder": folder,
+                        "start": 0, "end": len(paths)}]
+        self._appending = False
+        self._append_tries = 0
+        self.last_src = self.cur_src
         self.status.configure(text="共 %d 张图片，正在生成缩略图…" % len(paths))
         self._build_thumb_cells()
         self._layout_strip()
@@ -1067,7 +1132,11 @@ class ViewerApp(object):
             return
         keep = self.cur_index if self.cur_index >= 0 else 0
         if self.apply_all.get():
-            targets = range(len(self.paths))
+            album = self._album_of(keep)
+            if album:
+                targets = range(album["start"], album["end"])
+            else:
+                targets = range(len(self.paths))
         else:
             targets = [keep]
         for j in targets:
@@ -1113,6 +1182,124 @@ class ViewerApp(object):
         self.base_order = []
         if self.paths:
             self._layout_strip()
+
+    # ------------------------------------------------------------ 连读：读到最后一页自动接下一个
+
+    def _bottom_reached(self):
+        try:
+            return (self.strip.canvasy(0) + self.strip.winfo_height()
+                    >= self.strip_total - 2)
+        except Exception:
+            return False
+
+    def _maybe_append(self):
+        if not self.autonext.get() or not self.paths or self._appending or not self.albums:
+            return
+        if self._append_tries > 8 or not self._bottom_reached():
+            return
+        last = self.albums[-1]
+        nxt = find_next_source(last["kind"], last["src"])
+        if not nxt:
+            return
+        if self.last_src and os.path.normcase(os.path.abspath(nxt[1])) == \
+                os.path.normcase(os.path.abspath(self.last_src[1])):
+            return
+        self._appending = True
+        self._append_tries += 1
+        name = os.path.basename(os.path.normpath(nxt[1]))
+        self.status.configure(text="读到末尾，正在接下一个：%s …" % name)
+        threading.Thread(target=self._append_worker,
+                         args=(self.token, nxt[0], nxt[1]), daemon=True).start()
+
+    def _append_worker(self, token, kind, src):
+        try:
+            if kind == "arch":
+                dest = extract_dir_for(src)
+                extract_archive(src, dest)
+                folder = find_first_image_dir(dest) or dest
+            else:
+                folder = src
+            paths = list_images(folder)
+            sizes = [read_size(p) for p in paths]
+            self.q.put(("append", token, kind, src, folder, paths, sizes, None))
+        except Exception as e:
+            self.q.put(("append", token, kind, src, None, [], [], str(e)))
+
+    def _on_append_done(self, kind, src, folder, paths, sizes, err):
+        self._appending = False
+        if err:
+            self.status.configure(text="接下一个失败：%s" % str(err).splitlines()[0])
+            self.last_src = (kind, src)
+            return
+        if not paths:
+            self.last_src = (kind, src)
+            self._maybe_append()
+            return
+        start = len(self.paths)
+        self.paths.extend(paths)
+        self.sizes.extend(sizes)
+        self.albums.append({"kind": kind, "src": src, "folder": folder,
+                            "start": start, "end": len(self.paths)})
+        self.last_src = (kind, src)
+        self._append_tries = 0
+        self._extend_layout(start)
+        self._append_thumb_cells(start)
+        self._strip_sync()
+        threading.Thread(target=self._thumb_worker, args=(self.token, paths, start),
+                         daemon=True).start()
+        self.status.configure(text="已接上：%s（当前共 %d 张 / %d 段）"
+                              % (os.path.basename(os.path.normpath(folder)),
+                                 len(self.paths), len(self.albums)))
+
+    def _extend_layout(self, start):
+        c = self.strip
+        cw = max(40, c.winfo_width())
+        y = self.strip_total
+        for i in range(start, len(self.sizes)):
+            w, h = self.sizes[i]
+            if w <= 0 or h <= 0:
+                self.ys.append(y)
+                self.geom.append((y, self.dw, 0))
+                continue
+            deg = self.rot.get(self.paths[i], 0)
+            rw, rh = (h, w) if deg % 180 else (w, h)
+            dh = max(1, int(round(rh * float(self.dw) / float(rw))))
+            self.ys.append(y)
+            self.geom.append((y, self.dw, dh))
+            y += dh
+        self.strip_total = max(1, y)
+        c.configure(scrollregion=(0, 0, max(cw, self.dw), self.strip_total))
+
+    def _append_thumb_cells(self, start):
+        c = self.thumb_canvas
+        w = max(c.winfo_width(), CELL_W)
+        cols = max(1, int(w // CELL_W))
+        if cols != self.thumb_cols:
+            self._build_thumb_cells()
+            return
+        for i in range(start, len(self.paths)):
+            r, col = divmod(i, cols)
+            x0 = col * CELL_W
+            y0 = r * CELL_H
+            rect = c.create_rectangle(x0 + 3, y0 + 3, x0 + CELL_W - 3, y0 + CELL_H - 3,
+                                      outline="#404040", width=1, fill="#232323")
+            self.thumb_rect[i] = rect
+            c.create_text(x0 + CELL_W // 2, y0 + CELL_H - 12, text=str(i + 1),
+                          fill="#9a9a9a", font=FONT_SMALL)
+            ph = c.create_text(x0 + CELL_W // 2, y0 + (CELL_H - 20) // 2,
+                               text="…", fill="#5c5c5c", font=FONT_UI)
+            self.thumb_cell[i] = [x0, y0, ph]
+            if i in self.thumb_photos:
+                self._place_thumb(i)
+        rows = (len(self.paths) + cols - 1) // cols
+        self.thumb_total = rows * CELL_H + 8
+        c.configure(scrollregion=(0, 0, w, self.thumb_total))
+
+    def _album_of(self, idx):
+        for a in self.albums:
+            if a["start"] <= idx < a["end"]:
+                return a
+        return self.albums[-1] if self.albums else None
 
     # ------------------------------------------------------------ 右侧连续浏览
 
@@ -1210,6 +1397,8 @@ class ViewerApp(object):
         new = max(0, min(self.strip_total - vh, top + dy))
         c.yview_moveto(new / max(1.0, float(self.strip_total)))
         self._strip_sync()
+        if dy > 0:
+            self._maybe_append()
         return "break"
 
     def _goto_page(self, idx):
