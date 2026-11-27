@@ -170,6 +170,29 @@ def make_batch_dir(n=12):
     return d
 
 
+def check_final_order():
+    """名字是「最终 / 最后」的条目默认排到最后"""
+    d = os.path.join(HERE, "_自检排序")
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    for n in ("1", "2", "10", "最终", "最后", "第10话 最终"):
+        sub = os.path.join(d, n)
+        if not os.path.isdir(sub):
+            os.makedirs(sub)
+    for n in ("a.png", "最终.png", "b.png"):
+        f = os.path.join(d, n)
+        if not os.path.exists(f):
+            page_image("final", 1, (140, 120, 90)).save(f)
+    got = [e[1] for e in mod.list_entries(d)]
+    finals = got[-3:]
+    print("[10] 收尾名称排最后：%s → 末尾 %s" % (got, finals))
+    assert finals == ["最后", "最终", "第10话 最终"], got
+    assert got[:3] == ["1", "2", "10"], got
+    imgs = [os.path.basename(p) for p in mod.list_images(d)]
+    print("     图片排序：%s（最终.png 在最后）" % imgs)
+    assert imgs[-1] == "最终.png" and imgs[:2] == ["a.png", "b.png"], imgs
+
+
 def check_gui():
     import tkinter as tk
     root = tk.Tk()
@@ -331,12 +354,14 @@ def check_gui():
     # 分批读取：一次只进来 5 张，滚到附近自动补下一批，全部读完才收尾
     bdir = make_batch_dir(12)
     app.autonext.set(0)                     # 这一段只验分批，不接别的目录
+    app.batch = 5
+    app.batch_var.set("5")
     app.load_folder(bdir)
     wait(root, 2.0)
     print("[9] 分批：首屏载入 %d 张 / 共 %d 张，段数 %d，还剩 %d 张没读"
           % (len(app.paths), app.total_hint, len(app.albums), len(app.pending)))
-    assert len(app.paths) == mod.BATCH and app.total_hint == 12
-    assert len(app.pending) == 12 - mod.BATCH
+    assert len(app.paths) == 5 and app.total_hint == 12
+    assert len(app.pending) == 12 - 5
     got = [len(app.paths)]
     for _ in range(6):
         app._goto_page(len(app.paths) - 1)
@@ -350,6 +375,13 @@ def check_gui():
     assert got[0] == mod.BATCH and got == sorted(got) and got[-1] == 12
     assert len(app.paths) == 12 and not app.pending and len(app.albums) == 1
     assert app.paths == mod.list_images(bdir), "分批拼出来的顺序必须和目录里一致，不能重复/漏页"
+    app.batch_var.set("10")
+    app._on_batch_change()
+    assert app.batch == 10 and app.batch_box.get() == "10", "下拉换批次没生效"
+    app.batch_var.set("5")
+    app._on_batch_change()
+    assert app.batch == 5
+    print("    批次下拉 5 / 10 / 20 切换 OK（当前 %d，存在 config.json）" % app.batch)
     app.autonext.set(1)
 
     root.destroy()
@@ -360,6 +392,7 @@ if __name__ == "__main__":
     make_zip()
     make_zip_multi()
     check_sort()
+    check_final_order()
     check_thumbs()
     check_archives()
     check_gui()

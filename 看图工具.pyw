@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.5 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v1.6 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -110,6 +110,23 @@ def natural_key(name):
     return (key, low)
 
 
+FINAL_NAMES = ("最终", "最后", "完结", "大结局", "end", "the end", "final")
+
+
+def is_final_name(name, is_file=False):
+    """名字是「最终 / 最后 / 完结」这类收尾标记 → 排序时永远排最后"""
+    base = os.path.splitext(name)[0] if is_file else name
+    base = (base or "").strip().lower()
+    if not base:
+        return False
+    return base in FINAL_NAMES or base.endswith(("最终", "最后", "完结", "大结局"))
+
+
+def sort_key(name, is_file=False):
+    """先按「是不是收尾标记」分组，再走自然排序"""
+    return (1 if is_final_name(name, is_file) else 0, natural_key(name))
+
+
 def is_image_name(name):
     return os.path.splitext(name)[1].lower() in IMG_EXT
 
@@ -154,8 +171,8 @@ def list_entries(path):
                     pass
     except OSError:
         pass
-    dirs.sort(key=lambda t: natural_key(t[0]))
-    archs.sort(key=lambda t: natural_key(t[0]))
+    dirs.sort(key=lambda t: sort_key(t[0]))
+    archs.sort(key=lambda t: sort_key(t[0], True))
     out = [("dir", n, p) for (n, p) in dirs]
     out += [("arch", n, p) for (n, p) in archs]
     return out
@@ -177,7 +194,7 @@ def list_subdirs(path):
                     pass
     except OSError:
         pass
-    names.sort(key=natural_key)
+    names.sort(key=lambda n: sort_key(n))
     return names
 
 
@@ -195,7 +212,7 @@ def list_images(path):
                     pass
     except OSError:
         pass
-    names.sort(key=natural_key)
+    names.sort(key=lambda n: sort_key(n, True))
     return [os.path.join(path, n) for n in names]
 
 
@@ -525,7 +542,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.5")
+        self.root.title("连续看图工具 v1.6")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -555,9 +572,10 @@ class ViewerApp(object):
         self._append_tries = 0
         self._attempted = set()       # 本次阅读里已经尝试过的接续目标
         self.last_src = None          # 最近一次接上的来源，避免重复接同一个
-        self.pending = []             # 当前这一本还没读进来的图片路径（每次只取 BATCH 张）
+        self.pending = []             # 当前这一本还没读进来的图片路径（每次只取 batch 张）
         self._loading = False         # 正在后台量下一批尺寸 / 正在接下一本
         self.total_hint = 0           # 当前这本总共多少张（只用于状态提示）
+        self.batch = BATCH            # 每批读多少张（工具栏下拉 5 / 10 / 20）
 
         self.geom = []
         self.ys = []
@@ -624,6 +642,15 @@ class ViewerApp(object):
         self.autonext = tk.BooleanVar(value=True)
         tk.Checkbutton(bar, text="连读下一个", variable=self.autonext,
                        font=FONT_UI).pack(side="left", padx=2)
+
+        tk.Label(bar, text="每批", font=FONT_UI).pack(side="left", padx=(8, 2))
+        self.batch_var = tk.StringVar(value=str(self.batch))
+        self.batch_box = ttk.Combobox(bar, textvariable=self.batch_var, width=4,
+                                      values=("5", "10", "20"), state="readonly",
+                                      font=FONT_UI)
+        self.batch_box.pack(side="left", padx=2, pady=4)
+        self.batch_box.bind("<<ComboboxSelected>>", self._on_batch_change)
+        tk.Label(bar, text="张", font=FONT_UI).pack(side="left")
 
         self.pos_var = tk.StringVar(value="第 0 / 0 页")
         tk.Label(bar, textvariable=self.pos_var, width=13, anchor="w",
@@ -715,10 +742,33 @@ class ViewerApp(object):
         else:
             self.root.geometry("1360x880")
         self.root.minsize(960, 600)
+        try:
+            self.batch = max(1, int(cfg.get("batch", BATCH)))
+        except Exception:
+            self.batch = BATCH
+        if self.batch not in (5, 10, 20):
+            self.batch = BATCH
+        try:
+            self.batch_var.set(str(self.batch))
+        except Exception:
+            pass
+
+    def _on_batch_change(self, event=None):
+        """下拉里换批次大小：下一批马上按新值读，不用重开这本"""
+        try:
+            n = int(self.batch_var.get())
+        except Exception:
+            n = BATCH
+        self.batch = max(1, n)
+        self._save_cfg()
+        self.status.configure(text="每批改为 %d 张，后面的批次按新值读取" % self.batch)
+        if self.pending or self.paths:
+            self._maybe_more()
 
     def _save_cfg(self):
         try:
-            cfg = {"geometry": self.root.winfo_geometry(), "root_dir": self.root_dir}
+            cfg = {"geometry": self.root.winfo_geometry(), "root_dir": self.root_dir,
+                   "batch": self.batch}
             with open(CFG_PATH, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False)
         except Exception:
@@ -948,7 +998,7 @@ class ViewerApp(object):
                     paths = list_images(folder)
         except Exception:
             paths = []
-        sizes = [read_size(p) for p in paths[:BATCH]]   # 只量首批，其余等滚到再量
+        sizes = [read_size(p) for p in paths[:self.batch]]   # 只量首批，其余等滚到再量
         self.q.put(("scan", token, folder, paths, sizes))
 
     def _thumb_worker(self, token, paths, offset=0):
@@ -1024,9 +1074,9 @@ class ViewerApp(object):
                                   % folder)
             return
         total = len(paths)
-        self.paths = paths[:BATCH]
-        self.sizes = sizes[:BATCH]
-        self.pending = paths[BATCH:]
+        self.paths = paths[:self.batch]
+        self.sizes = sizes[:self.batch]
+        self.pending = paths[self.batch:]
         self.albums = [{"kind": self.cur_src[0], "src": self.cur_src[1], "folder": folder,
                         "start": 0, "end": len(self.paths)}]
         self._appending = False
@@ -1281,8 +1331,8 @@ class ViewerApp(object):
         if self._loading or not self.paths:
             return
         if self.pending:
-            chunk = self.pending[:BATCH]
-            self.pending = self.pending[BATCH:]
+            chunk = self.pending[:self.batch]
+            self.pending = self.pending[self.batch:]
             self._loading = True
             self.status.configure(text="读取中…（本批 %d 张，这本还剩 %d 张没读）"
                                   % (len(chunk), len(self.pending)))
@@ -1318,7 +1368,7 @@ class ViewerApp(object):
                          args=(self.token, kind, src, folder), daemon=True).start()
 
     def _append_worker(self, token, kind, src, folder):
-        """接下一本：只解压 / 扫名字 / 量前 BATCH 张尺寸，剩下的留到后面再读"""
+        """接下一本：只解压 / 扫名字 / 量前 batch 张尺寸，剩下的留到后面再读"""
         try:
             root = extract_dir_for(src) if kind == "arch" else src
             if kind == "arch" and not os.path.exists(os.path.join(root, ".done")):
@@ -1326,10 +1376,10 @@ class ViewerApp(object):
             if folder is None:
                 folder = first_dir_with_images(root)
             all_paths = list_images(folder) if folder else []
-            chunk = all_paths[:BATCH]
+            chunk = all_paths[:self.batch]
             sizes = [read_size(p) for p in chunk]
             self.q.put(("append", token, kind, src, folder, chunk, sizes,
-                        all_paths[BATCH:], None))
+                        all_paths[self.batch:], None))
         except Exception as e:
             self.q.put(("append", token, kind, src, None, [], [], [], str(e)))
 
