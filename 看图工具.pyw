@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.0 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.1 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -564,7 +564,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.0")
+        self.root.title("连续看图工具 v2.1")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -858,6 +858,7 @@ class ViewerApp(object):
         return "break"
 
     def _enter_view_mode(self):
+        """只收起左树和中缩略图：工具栏、状态栏都留着，窗口照旧能拖动、能改大小"""
         if self.view_mode or not self.paths:
             return
         self.view_mode = True
@@ -867,26 +868,14 @@ class ViewerApp(object):
                 self.paned.forget(pane)
             except Exception:
                 pass
-        try:
-            self.bar.pack_forget()
-        except Exception:
-            pass
-        try:
-            self.root.attributes("-fullscreen", True)
-        except Exception:
-            pass
         self._invalidate_strip()
         self._strip_sync(force=True)
-        self.status.configure(text="纯净看图：双击或 Esc 退出，右键出菜单")
+        self.status.configure(text="只看图片：双击图片区或 Esc 退出，右键出菜单")
 
     def _exit_view_mode(self):
         if not self.view_mode:
             return
         self.view_mode = False
-        try:
-            self.root.attributes("-fullscreen", False)
-        except Exception:
-            pass
         for pane in (self.left_frame, self.mid_frame, self.right_frame):
             try:
                 self.paned.forget(pane)
@@ -895,21 +884,9 @@ class ViewerApp(object):
         self.paned.add(self.left_frame, width=230, minsize=150, stretch="never")
         self.paned.add(self.mid_frame, width=340, minsize=180)
         self.paned.add(self.right_frame, width=760, minsize=300)
-        try:
-            self.bar.pack(side="top", fill="x", before=self.paned)
-        except Exception:
-            try:
-                self.bar.pack(side="top", fill="x")
-            except Exception:
-                pass
-        if self._saved_geo:
-            try:
-                self.root.geometry(self._saved_geo)
-            except Exception:
-                pass
         self._invalidate_strip()
         self._strip_sync(force=True)
-        self.status.configure(text="已退出纯净看图")
+        self.status.configure(text="已恢复三栏浏览")
 
     def open_file(self):
         p = filedialog.askopenfilename(

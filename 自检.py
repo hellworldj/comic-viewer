@@ -395,10 +395,11 @@ def check_gui():
     assert app.dw == 1400 and "1400" in app.zoom_var.get()
     app._enter_view_mode()
     wait(root, 0.6)
-    print("     纯净看图：view_mode=%s，工具栏可见=%s，面板数=%d"
+    print("     只看图片：view_mode=%s，工具栏可见=%s，面板数=%d"
           % (app.view_mode, app.bar.winfo_ismapped(), len(app.paned.panes())))
-    assert app.view_mode and not app.bar.winfo_ismapped()
-    assert len(app.paned.panes()) == 1, "纯净模式应只留图片浏览区"
+    assert app.view_mode and app.bar.winfo_ismapped(), "工具栏（菜单栏）要保留"
+    assert len(app.paned.panes()) == 1, "只看图片时应只留图片浏览区"
+    assert not app.root.attributes("-fullscreen"), "不强制全屏，窗口还要能拖动改大小"
     app._exit_view_mode()
     wait(root, 0.6)
     assert not app.view_mode and app.bar.winfo_ismapped()
