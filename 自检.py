@@ -469,6 +469,19 @@ def check_gui():
         wait(root, 0.4)
         print("     小字号 %dpx → 标准 %dpx，四档可切换" % (px_sm, mod.ui_px()))
         assert px_sm < px_std < px_xl
+        # 右键菜单也要跟着字号走（Tk 在 Windows 上默认给菜单写死 9pt，必须显式挂命名字体）
+        app.font_var.set("大")
+        app._on_font_change()
+        wait(root, 0.3)
+        app._show_menu()
+        wait(root, 0.3)
+        menu_font = str(app._menu.cget("font"))
+        cfgv = root.tk.splitlist(root.tk.call("font", "configure", menu_font))
+        px_menu = abs(int(dict(zip(cfgv[0::2], cfgv[1::2])).get("-size", 0)))
+        app._menu.unpost()
+        print("     右键菜单字体：%s，实际 %dpx（大档）" % (menu_font, px_menu))
+        assert menu_font == mod.FONT_UI, "右键菜单必须挂 PVUI 命名字体"
+        assert px_menu >= mod.ui_px() - 1, "右键菜单字号要跟界面字号一致"
     except AssertionError:
         raise
     except Exception as e:

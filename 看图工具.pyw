@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.3 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.4 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -689,7 +689,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.3")
+        self.root.title("连续看图工具 v2.4")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -1009,16 +1009,16 @@ class ViewerApp(object):
     def _show_menu(self, event=None):
         m = self._menu
         if m is None:
-            m = self._menu = tk.Menu(self.root, tearoff=0)
+            m = self._menu = tk.Menu(self.root, tearoff=0, font=FONT_UI)
         m.delete(0, "end")
         m.add_command(label="打开文件夹…", command=self.choose_dir)
         m.add_command(label="打开文件…", command=self.open_file)
-        bm = tk.Menu(m, tearoff=0)
+        bm = tk.Menu(m, tearoff=0, font=FONT_UI)
         for n in (5, 10, 20):
             bm.add_radiobutton(label="每批 %d 张" % n, value=str(n),
                                variable=self.batch_var, command=self._on_batch_change)
         m.add_cascade(label="每批张数（当前 %d）" % self.batch, menu=bm)
-        fm = tk.Menu(m, tearoff=0)
+        fm = tk.Menu(m, tearoff=0, font=FONT_UI)
         for name, _ in FONT_LEVELS:
             fm.add_radiobutton(label="字号 %s" % name, value=name,
                                variable=self.font_var, command=self._on_font_change)
@@ -1034,7 +1034,9 @@ class ViewerApp(object):
                       command=self._toggle_view_mode)
         m.add_command(label="刷新目录", command=self.refresh)
         try:
-            m.tk_popup(event.x_root, event.y_root)
+            x = event.x_root if event is not None else self.root.winfo_pointerx()
+            y = event.y_root if event is not None else self.root.winfo_pointery()
+            m.tk_popup(x, y)
         finally:
             try:
                 m.grab_release()
