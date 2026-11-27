@@ -14,3 +14,6 @@ _tmp_zip_page.png
 build/
 dist/
 *.spec
+
+# 本地预览图（仓库里只用 docs/screenshot.png）
+界面预览.png
