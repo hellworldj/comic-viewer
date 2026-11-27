@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v1.3 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v1.4 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -491,42 +491,30 @@ def find_first_image_dir(root, max_depth=MAX_DEPTH):
     return None
 
 
-def first_album_in(kind, path, depth=0):
-    """一个条目（文件夹/压缩包）里第一处有图片的位置"""
-    if kind == "arch":
-        return ("arch", path)
-    if list_images(path):
-        return ("dir", path)
-    if depth >= 3:
-        return None
-    for name in list_subdirs(path):
-        got = first_album_in("dir", os.path.join(path, name), depth + 1)
-        if got:
-            return got
+def dirs_with_images(root):
+    """root 子树里所有「直接含有图片」的目录，按树的先序（含 root 自己）"""
+    if list_images(root):
+        yield root
+    for name in list_subdirs(root):
+        for d in dirs_with_images(os.path.join(root, name)):
+            yield d
+
+
+def first_dir_with_images(root):
+    for d in dirs_with_images(root):
+        return d
     return None
 
 
-def find_next_source(kind, path):
-    """按「同级自然顺序 → 没有就上溯一层」找下一个有图的位置"""
-    node, node_kind = path, kind
-    for _ in range(8):
-        parent = os.path.dirname(os.path.abspath(node))
-        if not parent or os.path.normcase(parent) == os.path.normcase(node):
-            return None
-        entries = list_entries(parent)
-        cur = os.path.normcase(os.path.abspath(node))
-        idx = -1
-        for i, e in enumerate(entries):
-            if os.path.normcase(os.path.abspath(e[2])) == cur:
-                idx = i
-                break
-        if idx == -1:
-            return None
-        for e in entries[idx + 1:]:
-            got = first_album_in(e[0], e[2])
-            if got:
-                return got
-        node, node_kind = parent, "dir"
+def next_dir_after(root, current):
+    """root 子树内 current 的先序后继目录（含图），没有则 None"""
+    cur = os.path.normcase(os.path.abspath(current))
+    found = False
+    for d in dirs_with_images(root):
+        if found:
+            return d
+        if os.path.normcase(os.path.abspath(d)) == cur:
+            found = True
     return None
 
 
@@ -536,7 +524,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v1.3")
+        self.root.title("连续看图工具 v1.4")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -561,8 +549,10 @@ class ViewerApp(object):
         # 连读（读到最后一页自动接下一个文件夹/压缩包）
         self.albums = []              # [{kind, src, folder, start, end}]
         self.cur_src = None           # 当前来源 ('dir'|'arch', path)
+        self.archive_map = {}         # 解压目录 -> 原始压缩包路径
         self._appending = False
         self._append_tries = 0
+        self._attempted = set()       # 本次阅读里已经尝试过的接续目标
         self.last_src = None          # 最近一次接上的来源，避免重复接同一个
 
         self.geom = []
@@ -838,6 +828,7 @@ class ViewerApp(object):
 
     def _attach_archive(self, iid, path, dest):
         self.tree_paths[iid] = dest
+        self.archive_map[os.path.abspath(dest)] = path
         try:
             self.tree.item(iid, text="▤ " + os.path.basename(path))
         except Exception:
@@ -847,29 +838,28 @@ class ViewerApp(object):
             self.tree.item(iid, open=True)
         except Exception:
             pass
-        # 解压后的根目录常常只是一个同名文件夹，自动往里走
+        # 包里通常先套一层同名文件夹，顺着先序第一个有图的目录展开
+        target = first_dir_with_images(dest) or dest
+        rel = os.path.relpath(target, dest)
         node = iid
-        if not list_images(dest):
-            node = iid
-            for _ in range(MAX_DEPTH):
+        if rel not in (".", ""):
+            for part in rel.split(os.sep):
                 self._ensure_children(node)
-                kids = self.tree.get_children(node)
-                if not kids:
+                found = None
+                for c in self.tree.get_children(node):
+                    if self.tree.item(c, "text") == part:
+                        found = c
+                        break
+                if not found:
                     break
-                node = kids[0]
-                p = self.tree_paths.get(node, "")
-                if not os.path.isdir(p):
-                    node = iid
-                    break
+                node = found
                 try:
                     self.tree.item(node, open=True)
                 except Exception:
                     pass
-                if list_images(p):
-                    break
         self.tree.selection_set(node)
         self.tree.focus(node)
-        self.load_folder(self.tree_paths.get(node, dest), src=("arch", path))
+        self.load_folder(self.tree_paths.get(node, target), src=("arch", path))
 
     def open_archive_path(self, path):
         """命令行直接打开某个压缩包：先打开它所在目录，再选中并解压这个包"""
@@ -896,6 +886,8 @@ class ViewerApp(object):
         self.albums = []
         self.cur_src = None
         self._appending = False
+        self._append_tries = 0
+        self._attempted = set()
         self.last_src = None
         self.thumb_photos.clear()
         self.thumb_cell.clear()
@@ -919,15 +911,32 @@ class ViewerApp(object):
         token = self.token
         self.cur_folder = folder
         self._clear_views()
-        self.cur_src = src if src else ("dir", folder)
+        if src is None:
+            src = self._src_of(folder)
+        self.cur_src = src
         short = os.path.basename(os.path.normpath(folder)) or folder
         self.status.configure(text="正在读取：%s …" % short)
         t = threading.Thread(target=self._scan_worker, args=(folder, token), daemon=True)
         t.start()
 
+    def _src_of(self, folder):
+        """这个目录属于哪个「树节点」：压缩包解出来的目录要回溯到压缩包"""
+        p = os.path.normcase(os.path.abspath(folder))
+        for base, arch in self.archive_map.items():
+            b = os.path.normcase(os.path.abspath(base))
+            if p == b or p.startswith(b + os.sep):
+                return ("arch", arch)
+        return ("dir", folder)
+
     def _scan_worker(self, folder, token):
         try:
             paths = list_images(folder)
+            if not paths:
+                # 选中的父目录里没有直接图片：自动先进去第一个有图的子目录
+                inner = first_dir_with_images(folder)
+                if inner:
+                    folder = inner
+                    paths = list_images(folder)
         except Exception:
             paths = []
         sizes = [read_size(p) for p in paths]
@@ -1192,34 +1201,72 @@ class ViewerApp(object):
         except Exception:
             return False
 
+    def _inner_root(self, kind, src):
+        return extract_dir_for(src) if kind == "arch" else src
+
+    def _next_target(self):
+        """下一个要读的位置：(kind, src, folder)；folder=None 表示进这个条目的第一个有图目录"""
+        if not self.albums:
+            return None
+        last = self.albums[-1]
+        root = self._inner_root(last["kind"], last["src"])
+        nxt = next_dir_after(root, last["folder"])
+        if nxt:
+            return (last["kind"], last["src"], nxt)
+        return self._outer_successor(last["kind"], last["src"])
+
+    def _outer_successor(self, kind, path):
+        """在当前条目之后，按树的先序找下一个条目（同级之后 → 逐层上溯）"""
+        node = os.path.abspath(path)
+        rt = os.path.normcase(os.path.abspath(self.root_dir)) if self.root_dir else None
+        for _ in range(10):
+            if rt and os.path.normcase(node) == rt:
+                return None
+            parent = os.path.dirname(node)
+            if not parent or os.path.normcase(parent) == os.path.normcase(node):
+                return None
+            entries = list_entries(parent)
+            cur = os.path.normcase(node)
+            idx = -1
+            for i, e in enumerate(entries):
+                if os.path.normcase(os.path.abspath(e[2])) == cur:
+                    idx = i
+                    break
+            if idx >= 0:
+                for e in entries[idx + 1:]:
+                    return (e[0], e[2], None)
+            node = parent
+        return None
+
     def _maybe_append(self):
         if not self.autonext.get() or not self.paths or self._appending or not self.albums:
             return
         if self._append_tries > 8 or not self._bottom_reached():
             return
-        last = self.albums[-1]
-        nxt = find_next_source(last["kind"], last["src"])
-        if not nxt:
+        target = self._next_target()
+        if not target:
             return
-        if self.last_src and os.path.normcase(os.path.abspath(nxt[1])) == \
-                os.path.normcase(os.path.abspath(self.last_src[1])):
+        kind, src, folder = target
+        key = (kind, os.path.normcase(os.path.abspath(src)),
+               os.path.normcase(os.path.abspath(folder)) if folder else "<auto>")
+        if key in self._attempted:
             return
-        self._appending = True
+        self._attempted.add(key)
         self._append_tries += 1
-        name = os.path.basename(os.path.normpath(nxt[1]))
+        self._appending = True
+        name = os.path.basename(os.path.normpath(folder or src))
         self.status.configure(text="读到末尾，正在接下一个：%s …" % name)
         threading.Thread(target=self._append_worker,
-                         args=(self.token, nxt[0], nxt[1]), daemon=True).start()
+                         args=(self.token, kind, src, folder), daemon=True).start()
 
-    def _append_worker(self, token, kind, src):
+    def _append_worker(self, token, kind, src, folder):
         try:
-            if kind == "arch":
-                dest = extract_dir_for(src)
-                extract_archive(src, dest)
-                folder = find_first_image_dir(dest) or dest
-            else:
-                folder = src
-            paths = list_images(folder)
+            root = extract_dir_for(src) if kind == "arch" else src
+            if kind == "arch" and not os.path.exists(os.path.join(root, ".done")):
+                extract_archive(src, root)
+            if folder is None:
+                folder = first_dir_with_images(root)
+            paths = list_images(folder) if folder else []
             sizes = [read_size(p) for p in paths]
             self.q.put(("append", token, kind, src, folder, paths, sizes, None))
         except Exception as e:
@@ -1229,10 +1276,10 @@ class ViewerApp(object):
         self._appending = False
         if err:
             self.status.configure(text="接下一个失败：%s" % str(err).splitlines()[0])
-            self.last_src = (kind, src)
             return
         if not paths:
-            self.last_src = (kind, src)
+            self.status.configure(text="跳过没有图片的位置：%s"
+                                  % os.path.basename(os.path.normpath(folder or src)))
             self._maybe_append()
             return
         start = len(self.paths)
@@ -1240,6 +1287,8 @@ class ViewerApp(object):
         self.sizes.extend(sizes)
         self.albums.append({"kind": kind, "src": src, "folder": folder,
                             "start": start, "end": len(self.paths)})
+        if kind == "arch":
+            self.archive_map[os.path.abspath(extract_dir_for(src))] = src
         self.last_src = (kind, src)
         self._append_tries = 0
         self._extend_layout(start)

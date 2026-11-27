@@ -29,6 +29,7 @@ DIRS = ["1", "2", "3", "vol1", "vol2", "vol10", "漫画01", "漫画02", "漫画0
         "动漫a", "动漫b"]
 COLORS = [(210, 80, 80), (80, 160, 90), (80, 120, 200)]
 ZIP_NAME = "vol2.zip"
+ZIP_MULTI = "双话.zip"
 
 
 def page_image(label, page, color=(80, 120, 200)):
@@ -67,6 +68,23 @@ def make_zip():
             z.write(tmp, "vol2/p%d.png" % p)      # 包里套一层同名文件夹，测自动下钻
             os.remove(tmp)
     print("    已生成测试压缩包：", zpath)
+    return zpath
+
+
+def make_zip_multi():
+    """包里有两话，用来验证「同一个包内接着读」"""
+    zpath = os.path.join(SAMPLE, ZIP_MULTI)
+    if os.path.exists(zpath):
+        return zpath
+    tmp = os.path.join(HERE, "_tmp_multi_page.png")
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+        for tag in ("第1话", "第2话"):
+            for p in range(1, 3):
+                page_image("%s in %s" % (ZIP_MULTI, tag), p, (90, 150, 190)).save(tmp)
+                z.write(tmp, "%s/p%d.png" % (tag, p))
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    print("    已生成多话压缩包：", zpath)
     return zpath
 
 
@@ -258,13 +276,55 @@ def check_gui():
     assert app.albums[-1]["kind"] == "arch"
     assert os.path.basename(app.albums[-1]["src"]).lower() == ZIP_NAME
 
+    # 选中父目录（自己没有图）→ 自动进第一个有图的子目录，并沿子目录顺序读完
+    app.tree.selection_set(root_item)
+    app.tree.focus(root_item)
+    wait(root, 3.0)
+    print("[7] 选中根目录 → 自动读到 %s（%d 张，%d 段）"
+          % (os.path.basename(app.albums[0]["folder"]), len(app.paths), len(app.albums)))
+    assert os.path.basename(app.albums[0]["folder"]) == "1"
+    assert len(app.paths) == 3
+    app._goto_page(len(app.paths) - 1)
+    wait(root, 0.3)
+    app._strip_scroll(6000)
+    wait(root, 3.0)
+    print("    1 到底 → 接上 %s（共 %d 段）"
+          % (os.path.basename(app.albums[-1]["folder"]), len(app.albums)))
+    assert len(app.albums) == 2
+    assert os.path.basename(app.albums[-1]["folder"]) == "2", "应从同一层目录里接，不跳层"
+
+    # 同一个包里有多话 → 包内接着读，而不是跳出包
+    node2 = None
+    for c in app.tree.get_children(root_item):
+        if os.path.basename(app.tree_paths.get(c, "")).lower() == ZIP_MULTI:
+            node2 = c
+    assert node2, "目录树里没找到 %s" % ZIP_MULTI
+    app.tree.selection_set(node2)
+    app.tree.focus(node2)
+    app._open_archive_node(node2)
+    wait(root, 4.0)
+    print("[8] 选中 %s → 读到包内 %s（%d 张）"
+          % (ZIP_MULTI, os.path.basename(app.albums[0]["folder"]), len(app.paths)))
+    assert os.path.basename(app.albums[0]["folder"]) == "第1话"
+    app._goto_page(len(app.paths) - 1)
+    wait(root, 0.3)
+    app._strip_scroll(6000)
+    wait(root, 4.0)
+    print("    第1话 到底 → 接上包内 %s（%s，共 %d 段 / %d 张）"
+          % (os.path.basename(app.albums[-1]["folder"]), app.albums[-1]["kind"],
+             len(app.albums), len(app.paths)))
+    assert len(app.albums) == 2 and len(app.paths) == 4
+    assert os.path.basename(app.albums[-1]["folder"]) == "第2话"
+    assert app.albums[-1]["kind"] == "arch"
+
     root.destroy()
-    print("    三栏界面、旋转、缩放、zip 读取、连读 —— 全部正常")
+    print("    三栏界面、旋转、缩放、zip 读取、连读（同级 / 包内 / 父目录下钻） —— 全部正常")
 
 
 if __name__ == "__main__":
     make_sample()
     make_zip()
+    make_zip_multi()
     check_sort()
     check_thumbs()
     check_archives()
