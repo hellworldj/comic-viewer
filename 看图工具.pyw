@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.5 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.6 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -33,6 +33,22 @@ try:
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
+
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    HAS_DND = True
+except Exception:
+    HAS_DND = False
+
+
+def make_root():
+    """主窗口：装了 tkinterdnd2 就用它（拖拽走系统 OLE 拖放，最稳）"""
+    if HAS_DND:
+        try:
+            return TkinterDnD.Tk()
+        except Exception:
+            pass
+    return tk.Tk()
 
 
 # ---------------------------------------------------------------- 基础设置
@@ -690,7 +706,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.5")
+        self.root.title("连续看图工具 v2.6")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -767,6 +783,69 @@ class ViewerApp(object):
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_id = self.root.after(50, self._poll)
         self.root.after(200, self._auto_open)
+        self.root.after(300, self._init_drop)
+
+    # ------------------------------------------------------------ 拖拽支持（Windows 原生 WM_DROPFILES）
+
+    def _init_drop(self):
+        """把窗口注册成「可接收文件拖拽」（tkinterdnd2 / 系统 OLE 拖放）"""
+        self._drop_cb = None
+        if not HAS_DND:
+            return
+        try:
+            targets = [self.root, self.bar if hasattr(self, "bar") else self.root,
+                       self.paned if hasattr(self, "paned") else self.root,
+                       self.left_frame, self.mid_frame, self.right_frame,
+                       self.tree, self.thumb_canvas, self.strip,
+                       self.status_bar, self.status]
+            hit = 0
+            for w in targets:
+                try:
+                    w.drop_target_register(DND_FILES)
+                    w.dnd_bind("<<Drop>>", self._on_dnd_event)
+                    hit += 1
+                except Exception:
+                    pass
+            if hit:
+                self._drop_cb = True          # 标记“拖拽已就绪”
+                self._drop_hwnd = hit
+        except Exception as e:
+            self._drop_err = str(e)
+            self._drop_cb = None
+
+    def _on_dnd_event(self, event):
+        """tkdnd 送来的拖放事件：event.data 是 `/a/b.jpg /c/d.rar` 这种列表"""
+        try:
+            raw = self.root.tk.splitlist(event.data)
+        except Exception:
+            raw = [event.data]
+        paths = []
+        for p in raw:
+            p = str(p).strip()
+            if len(p) > 1 and p[0] == "{" and p[-1] == "}":
+                p = p[1:-1]
+            paths.append(p.strip('"'))
+        self._on_drop(paths)
+        try:
+            return event.action
+        except Exception:
+            return "copy"
+    def _on_drop(self, paths):
+        """拖进来的文件：图片→打开它所在目录并跳到这张；压缩包→直接开包；文件夹→当根目录打开"""
+        if not paths:
+            return
+        target = None
+        for p in paths:
+            p = p.strip().strip('"')
+            if p and os.path.exists(p):
+                target = p
+                break
+        if not target:
+            self.status.configure(text="拖进来的东西找不到，可能已被移动或删除")
+            return
+        if self.open_path(target):
+            return
+        self.status.configure(text="不支持的文件：%s" % os.path.basename(target))
 
     # ------------------------------------------------------------ 界面
 
@@ -1092,6 +1171,44 @@ class ViewerApp(object):
         self._strip_sync(force=True)
         self.status.configure(text="已恢复三栏浏览")
 
+    def _under(self, path, base):
+        try:
+            p = os.path.normcase(os.path.abspath(path))
+            b = os.path.normcase(os.path.abspath(base))
+            return os.path.commonpath([p, b]) == b
+        except Exception:
+            return False
+
+    def open_path(self, path):
+        """打开任意路径（拖拽也走这里）：图片→打开它所在目录并跳到这张；压缩包→开包；文件夹→当根目录"""
+        try:
+            path = os.path.abspath(path)
+        except Exception:
+            return False
+        if os.path.isdir(path):
+            self.open_root(path)
+            self.status.configure(text="已打开目录：%s" % path)
+            return True
+        if is_archive(path):
+            self.open_archive_path(path)
+            self.status.configure(text="正在打开压缩包：%s …" % os.path.basename(path))
+            return True
+        if not is_image_name(os.path.basename(path)):
+            return False
+        folder = os.path.dirname(path)
+        target = os.path.normcase(path)
+        base = self.root_dir
+        if base and os.path.isdir(base) and self._under(folder, base):
+            self._jump_to = target
+            self.load_folder(folder, src=self._src_of(folder))
+            self._show_path_in_tree(path)
+        else:
+            # 图不在当前根目录里：把图所在文件夹当新根（左树重建、缩略图当场重刷），再跳到这张
+            self._jump_to = target
+            self.open_root(folder)
+        self.status.configure(text="已打开：%s" % os.path.basename(path))
+        return True
+
     def open_file(self):
         p = filedialog.askopenfilename(
             title="打开图片或压缩包",
@@ -1100,16 +1217,7 @@ class ViewerApp(object):
                        ("所有文件", "*.*")])
         if not p:
             return
-        if is_archive(p):
-            self.open_archive_path(p)
-            return
-        if not is_image_name(os.path.basename(p)):
-            messagebox.showwarning("提示", "不支持这个文件：\n%s" % p)
-            return
-        folder = os.path.dirname(p)
-        self._jump_to = os.path.normcase(os.path.abspath(p))
-        self.load_folder(folder, src=self._src_of(folder))
-        self._show_path_in_tree(p)
+        self.open_path(p)
 
     def _show_path_in_tree(self, path):
         """在左栏里选中这个文件所在的条目（能找到就选）"""
@@ -1251,7 +1359,7 @@ class ViewerApp(object):
                     return
         except Exception:
             pass
-        self.status.configure(text="点左上角「打开目录」选择漫画文件夹")
+        self.status.configure(text="点左上角「打开目录」选择漫画文件夹，或直接把图片/压缩包拖进窗口")
 
     # ------------------------------------------------------------ 压缩包节点
 
@@ -2389,7 +2497,7 @@ class ViewerApp(object):
 
 
 def main():
-    root = tk.Tk()
+    root = make_root()
     # DPI 感知按原来的时机设置（放在建 Tk 之后），保证窗口尺寸/位置和以前一致
     try:
         if sys.platform == "win32":

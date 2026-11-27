@@ -229,7 +229,7 @@ def check_exif():
 
 def check_gui():
     import tkinter as tk
-    root = tk.Tk()
+    root = mod.make_root()
     root.withdraw()
     app = mod.ViewerApp(root)
     try:
@@ -494,7 +494,7 @@ def check_smooth():
     """滚动不能卡：解码在后台线程，主线程只贴图；滚轮事件合并绘制"""
     import tkinter as tk
     bdir = make_batch_dir(12)
-    root = tk.Tk()
+    root = mod.make_root()
     root.withdraw()
     app = mod.ViewerApp(root)
     root.deiconify()
@@ -524,6 +524,39 @@ def check_smooth():
     app.shutdown()
 
 
+def check_drop():
+    """拖拽：窗口要能被注册成接受拖放，拖进来的图要打开它所在目录并跳到这张"""
+    import tkinter as tk
+    bdir = make_batch_dir(12)
+    root = mod.make_root()
+    app = mod.ViewerApp(root)
+    wait(root, 1.2)
+    assert app._drop_cb is not None, "窗口没能注册拖放：%s" % getattr(app, "_drop_err", "?")
+    assert getattr(mod, "HAS_DND", False), "tkinterdnd2 没装上，拖拽不可用"
+    app.open_root(os.path.dirname(bdir))
+    wait(root, 2.0)
+    # 别的目录里的一张图，模拟 tkdnd 送来的 <<Drop>> 事件（数据是 {路径} 形式）
+    other = os.path.join(SAMPLE, "vol10", "p2.png")
+    if not os.path.exists(other):
+        other = os.path.join(os.path.dirname(bdir), "p2.png")
+    assert os.path.exists(other), other
+
+    class Ev(object):
+        data = "{%s}" % other
+        action = "copy"
+
+    app._on_dnd_event(Ev())
+    wait(root, 2.5)
+    assert app.cur_folder and os.path.basename(os.path.abspath(app.cur_folder)) == \
+        os.path.basename(os.path.dirname(other)), "没切到这张图所在目录"
+    assert app.paths and os.path.basename(app.paths[app.cur_index]) == os.path.basename(other), \
+        "没跳到拖进来的那张图"
+    print("[15] 拖放已就绪（%d 个控件注册），拖入图片后目录切到 %s、跳到 %s"
+          % (getattr(app, "_drop_hwnd", 0) or 0, os.path.basename(app.cur_folder),
+             os.path.basename(other)))
+    app.shutdown()
+
+
 if __name__ == "__main__":
     make_sample()
     make_zip()
@@ -535,5 +568,6 @@ if __name__ == "__main__":
     check_archives()
     check_gui()
     check_smooth()
+    check_drop()
     print("\n自检通过 ✔")
 

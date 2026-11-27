@@ -74,7 +74,12 @@
 - 缩略图每轮最多贴 6 张、每轮总预算 22ms，一次载入几千张时缩略图分批慢慢出，界面不堵。
 - 单页切片高度 1000 → 800（单片 2295×800），单次贴图更快、更少整片重绘。
 
-打包命令（本机已装 PyInstaller 6.x）：
+
+**13. 拖拽打开（v2.6）**
+- 直接把图片、压缩包、文件夹拖进窗口就打开：拖一张图会切到它所在的文件夹、把这批图的缩略图重刷出来，并直接跳到这张；拖压缩包直接开包；拖文件夹当根目录打开。
+- 拖拽走 `tkinterdnd2`（系统 OLE 拖放），不用自己改窗口过程，体积只多一点点；没装这个库时会退回「不能用拖拽」，其它功能不受影响。
+- 窗口任意位置都能接：工具条、目录树、缩略图、图片区、状态栏都注册成投放目标。
+打包命令（本机已装 PyInstaller 6.x，tkinterdnd2 自带打包钩子，无需额外参数）：
 
 ```bat
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name "看图工具" 看图工具.pyw
@@ -87,7 +92,8 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name "看图工
 | 操作系统 | Windows 7 SP1 / 10 / 11（64 位） | 需要 tcl/tk 8.6；已在 Win7 目标下用 Python 3.8.10 打包验证路径 |
 | Python | **3.8 – 3.13** | Win7 上只能用 3.8.10（官方支持 Win7 的最后一版）；Win10/11 可用新版 |
 | tkinter | 必装，随 Python 官方安装包勾选 `tcl/tk and IDLE` | 缺失时启动器会提示「没有找到可用的 Python」 |
-| Pillow | **≥ 8.0**（建议最新版） | 唯一第三方依赖：`pip install pillow`；`Image.Resampling` / `Image.Transpose` 缺失时自动回退老 API |
+| Pillow | **≥ 8.0**（建议最新版） | `pip install pillow`；`Image.Resampling` / `Image.Transpose` 缺失时自动回退老 API |
+| tkinterdnd2 | **≥ 2.8**（可选） | 拖拽打开靠它：`pip install tkinterdnd2`；没装则拖拽不可用，其余功能正常；打包时自带 PyInstaller 钩子 |
 | 内存 | 建议 ≥ 2 GB 空闲 | 每次只读 5 张、视口附近才解码，通常只占几十 MB；超长竖图按 800px 分片 |
 | rar / cbr | WinRAR（`UnRAR.exe` / `Rar.exe`）或 7-Zip | 自动查 `Program Files\WinRAR`、`D:\tool\7-Zip`、App Paths 注册表、PATH；缺了会回退到另一个 |
 | 7z | 7-Zip（`7z.exe`） | 同样自动查找；没有 WinRAR 时 rar 也可用 7z 解 |
@@ -95,7 +101,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name "看图工
 | 打包 exe | PyInstaller（可选） | Win7 目标需 Python 3.8.10 + PyInstaller ≤ 4.10；Win10/11 用新版即可 |
 | 磁盘 | 首次打开会生成缓存 | `thumbcache\` 缩略图、`extract_cache\` 解压缓存，都可随时删除 |
 
-没有外部依赖的部分全部是标准库：`zipfile` / `subprocess` / `hashlib` / `threading` / `tkinter`。除 Pillow 外不需要 `pip install` 任何东西；不联网也能用（只看本地文件）。
+没有外部依赖的部分全部是标准库：`zipfile` / `subprocess` / `hashlib` / `threading` / `tkinter`。除 Pillow 外只多一个可选的 `tkinterdnd2`（拖拽用）；不联网也能用（只看本地文件）。
 
 ## 运行
 
