@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-连续看图工具 v2.6 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
+连续看图工具 v2.7 —— 漫画 / 图集专用看图器（Windows 7 / Windows 10）
 
 功能：
   1. 自然排序读取子文件夹：1 2 3、vol1 vol2 vol10、漫画01 漫画02、动漫a 动漫b ……不会出现 vol1 / vol10 / vol100 混排
@@ -706,7 +706,7 @@ class ViewerApp(object):
 
     def __init__(self, root):
         self.root = root
-        self.root.title("连续看图工具 v2.6")
+        self.root.title("连续看图工具 v2.7")
         self.q = queue.Queue()
         self.token = 0
         self.root_dir = ""
@@ -768,6 +768,7 @@ class ViewerApp(object):
 
         self._resize_job = None
         self._build_job = None
+        self._first_job = None         # 首屏再排一次的定时器
         self._more_job = None          # 快到末尾时的预取定时器
         self._closing = False
 
@@ -780,6 +781,7 @@ class ViewerApp(object):
 
         self._build_ui()
         self._load_cfg()
+        self._enter_view_mode(force=True)      # 默认就是「浏览图」：只留图片区，工具栏/状态栏保留
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_id = self.root.after(50, self._poll)
         self.root.after(200, self._auto_open)
@@ -1119,8 +1121,8 @@ class ViewerApp(object):
         m.add_command(label="适应窗口大小", command=self.zoom_fit)
         m.add_command(label="固定图片宽度…", command=self.set_fixed_width)
         m.add_separator()
-        m.add_command(label=("退出纯净看图（Esc）" if self.view_mode
-                             else "只看图片（双击也可以）"),
+        m.add_command(label=("切到三栏浏览（双击也行）" if self.view_mode
+                             else "回到浏览图模式（双击也行）"),
                       command=self._toggle_view_mode)
         m.add_command(label="刷新目录", command=self.refresh)
         try:
@@ -1140,9 +1142,11 @@ class ViewerApp(object):
             self._enter_view_mode()
         return "break"
 
-    def _enter_view_mode(self):
+    def _enter_view_mode(self, force=False):
         """只收起左树和中缩略图：工具栏、状态栏都留着，窗口照旧能拖动、能改大小"""
-        if self.view_mode or not self.paths:
+        if self.view_mode:
+            return
+        if not self.paths and not force:
             return
         self.view_mode = True
         self._saved_geo = self.root.winfo_geometry()
@@ -1153,7 +1157,7 @@ class ViewerApp(object):
                 pass
         self._invalidate_strip()
         self._strip_sync(force=True)
-        self.status.configure(text="只看图片：双击图片区或 Esc 退出，右键出菜单")
+        self.status.configure(text="浏览图模式：双击图片区或 Esc 切到三栏（目录树+缩略图），右键出菜单")
 
     def _exit_view_mode(self):
         if not self.view_mode:
@@ -1169,7 +1173,7 @@ class ViewerApp(object):
         self.paned.add(self.right_frame, width=760, minsize=300)
         self._invalidate_strip()
         self._strip_sync(force=True)
-        self.status.configure(text="已恢复三栏浏览")
+        self.status.configure(text="三栏浏览：双击图片区或 Esc 回到浏览图模式")
 
     def _under(self, path, base):
         try:
@@ -1607,7 +1611,8 @@ class ViewerApp(object):
         except queue.Empty:
             pass
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()
         self._poll_id = self.root.after(60, self._poll)
 
     def _batch_worker(self, token, chunk, mode, kind, src, folder):
@@ -1641,6 +1646,9 @@ class ViewerApp(object):
         self._build_thumb_cells()
         self._layout_strip()
         self.strip.yview_moveto(0.0)
+        # 窗口刚显示时画布高度可能还是 0，稍后再排一次，保证首屏一定贴出来
+        self._clear_job("_first_job")
+        self._first_job = self.root.after(400, self._relayout_strip)
         self._strip_sync(force=True)
         t = threading.Thread(target=self._thumb_worker, args=(self.token, self.paths),
                              daemon=True)
@@ -2254,6 +2262,10 @@ class ViewerApp(object):
             return
         top = c.canvasy(0)
         vh = c.winfo_height()
+        if vh <= 1:
+            # 窗口还没真正显示出来（画布高度为 0）：先别算，等大小定下来再来一次
+            self._sync_retry()
+            return
         first = self._first_visible(top)
         if first < 0:
             return
@@ -2474,7 +2486,7 @@ class ViewerApp(object):
             self.root.after_cancel(self._poll_id)
         except Exception:
             pass
-        for attr in ("_sync_job", "_retry_job", "_more_job", "_resize_job", "_build_job"):
+        for attr in ("_sync_job", "_retry_job", "_more_job", "_resize_job", "_build_job", "_first_job"):
             job = getattr(self, attr, None)
             if job is not None:
                 try:
@@ -2535,8 +2547,6 @@ def main():
             root.after(200, lambda: app.open_archive_path(target))
 
     diag = os.environ.get("PV_DIAG")
-    if os.environ.get("PV_VIEW"):
-        root.after(1200, app._enter_view_mode)
     if diag:
         def _diag():
             try:
@@ -2548,6 +2558,13 @@ def main():
                         app.info.cget("text")))
                     f.write("paned=%s %s\n" % (app.paned.winfo_ismapped(),
                                               app.paned.winfo_geometry()))
+                    f.write("view=%s strip=%dx%d dw=%d off_x=%d total=%d photos=%d "
+                            "items=%d paths=%d cur=%d yview=%s q=%d pending=%d poll=%s\n" % (
+                                app.view_mode, app.strip.winfo_width(), app.strip.winfo_height(),
+                                app.dw, app.off_x, app.strip_total, len(app.page_photos),
+                                len(app.page_items), len(app.paths), app.cur_index,
+                                app.strip.yview(), app.band_q.qsize(), len(app._band_pending),
+                                app._poll_id))
             except Exception as e:
                 pass
             root.destroy()

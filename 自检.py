@@ -239,6 +239,7 @@ def check_gui():
     root.deiconify()
     app.open_root(SAMPLE)
     wait(root, 2.0)
+    assert app.view_mode and len(app.paned.panes()) == 1, "启动默认应是「浏览图」：只留图片区"
 
     # 选中 vol10 文件夹
     root_item = app.tree.get_children("")[0]
